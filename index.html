@@ -1,0 +1,547 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Live Crypto FGI</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+    .big { font-size: 44px; font-weight: 700; }
+    .muted { color: #666; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; }
+    .col { flex:1 1 220px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; font-size: 14px; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #ddd; font-size:12px; }
+    canvas { width: 100%; max-height: 320px; }
+    .small { font-size: 12px; }
+    code { background:#f7f7f7; padding:2px 4px; border-radius:6px; }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <div class="row">
+      <div class="col">
+        <div class="muted">Basket FGI (updates every 5s)</div>
+        <div id="fgi" class="big">--</div>
+        <div id="meta" class="muted small"></div>
+      </div>
+      <div class="col">
+        <div class="muted">Connection</div>
+        <div id="conn" class="pill">disconnected</div>
+        <div class="muted small" style="margin-top:8px;">
+          Streams: <code>aggTrade</code> + <code>depth10</code> for BTC/ETH/XRP/SOL
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="muted">FGI history</div>
+    <canvas id="chart"></canvas>
+  </div>
+
+  <div class="card">
+    <div class="muted">Per-asset components</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Symbol</th><th>Price</th><th>Asset</th><th>Mom</th><th>Vol</th><th>OB</th><th>Agg</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    // ----------------------------
+    // Config
+    // ----------------------------
+    const SYMBOLS = ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT"];
+
+    // Basket weights (must sum to 1)
+    const WEIGHTS = {
+      "BTCUSDT": 0.25,
+      "ETHUSDT": 0.25,
+      "XRPUSDT": 0.25,
+      "SOLUSDT": 0.25,
+    };
+
+    // Compute/publish cadence
+    const UPDATE_EVERY_MS = 5000;
+
+    // Basket EMA smoothing for display
+    const BASKET_ALPHA = 0.20; // reduce for smoother, increase for faster
+
+    // FGI core parameters (seconds)
+    const P = {
+      mom_short_s: 120,
+      mom_long_s: 3600,
+      vol_short_s: 240,
+      vol_long_s: 3600,
+      imb_window_s: 20,
+      aggr_window_s: 1200,
+
+      k_m_short: 0.005,
+      k_m_long: 0.02,
+      k_v_short: 0.01,
+      k_v_long: 0.02,
+
+      mom_blend_short: 0.5,
+      vol_blend_short: 0.5,
+
+      w_mom: 0.35,
+      w_vol: 0.25,
+      w_ob: 0.20,
+      w_aggr: 0.20,
+    };
+
+    // ----------------------------
+    // Helpers
+    // ----------------------------
+    const EPS = 1e-12;
+
+    function clamp(x, lo=0, hi=100) {
+      x = Number(x);
+      if (!Number.isFinite(x)) return lo;
+      return Math.max(lo, Math.min(hi, x));
+    }
+
+    function tanhScoreSigned(x, k) {
+      return clamp(50 + 50 * Math.tanh(x / (k + EPS)));
+    }
+
+    function tanhScoreNegative(x, k) {
+      return clamp(50 + 50 * Math.tanh((-x) / (k + EPS)));
+    }
+
+    function std(arr) {
+      // simple 2-pass std; arr is JS array of numbers
+      const n = arr.length;
+      if (n === 0) return 0;
+      let mean = 0;
+      for (const v of arr) mean += v;
+      mean /= n;
+      let ss = 0;
+      for (const v of arr) {
+        const d = v - mean;
+        ss += d*d;
+      }
+      return Math.sqrt(ss / n);
+    }
+
+    function fmt(x, d=2) {
+      if (x === null || x === undefined || !Number.isFinite(x)) return "--";
+      return Number(x).toFixed(d);
+    }
+
+    function colorForFGI(v) {
+      if (!Number.isFinite(v)) return "black";
+      if (v >= 60) return "red";
+      if (v <= 40) return "green";
+      return "black";
+    }
+
+    // ----------------------------
+    // Per-symbol rolling state (1s buckets)
+    // ----------------------------
+    class SymbolState {
+      constructor(symbol) {
+        this.symbol = symbol;
+
+        this.prices = [];   // [{t, p}]
+        this.rets = [];     // [{t, r}]
+        this.buy1s = [];    // [{t, v}]
+        this.sell1s = [];   // [{t, v}]
+        this.imb = [];      // [{t, v}] v in [-1,1]
+
+        this.curSec = null;
+        this.curPrice = null;
+        this.curBuy = 0;
+        this.curSell = 0;
+
+        this.lastPrice = null;
+      }
+
+      maxKeepSeconds() {
+        return Math.max(P.mom_long_s, P.vol_long_s, P.aggr_window_s, P.imb_window_s, 600) + 60;
+      }
+
+      prune(nowSec) {
+        const cutoff = nowSec - this.maxKeepSeconds();
+
+        const pruneArr = (arr) => {
+          while (arr.length && arr[0].t < cutoff) arr.shift();
+        };
+
+        pruneArr(this.prices);
+        pruneArr(this.rets);
+        pruneArr(this.buy1s);
+        pruneArr(this.sell1s);
+
+        // imbalance only needs short window + buffer
+        const cutoffImb = nowSec - (P.imb_window_s + 120);
+        while (this.imb.length && this.imb[0].t < cutoffImb) this.imb.shift();
+      }
+
+      flushSecond(sec, price, buyQty, sellQty) {
+        // append price
+        this.prices.push({t: sec, p: price});
+
+        // compute return vs previous price
+        const n = this.prices.length;
+        if (n >= 2) {
+          const pPrev = this.prices[n-2].p;
+          if (pPrev > 0 && price > 0) {
+            const r = Math.log(price / (pPrev + EPS));
+            this.rets.push({t: sec, r});
+          }
+        }
+
+        this.buy1s.push({t: sec, v: buyQty});
+        this.sell1s.push({t: sec, v: sellQty});
+      }
+
+      onAggTrade(eventMs, price, qty, isBuyerMaker) {
+        const sec = Math.floor(eventMs / 1000);
+        price = Number(price);
+        qty = Number(qty);
+        this.lastPrice = price;
+
+        if (this.curSec === null) {
+          this.curSec = sec;
+          this.curPrice = price;
+          this.curBuy = 0;
+          this.curSell = 0;
+        }
+
+        if (sec === this.curSec) {
+          this.curPrice = price;
+          if (isBuyerMaker) this.curSell += qty;
+          else this.curBuy += qty;
+          return;
+        }
+
+        // If we skipped seconds, fill missing seconds with last known price and zero volume.
+        // This makes horizons behave more consistently.
+        let s = this.curSec;
+        const lastP = Number(this.curPrice ?? price);
+        this.flushSecond(s, lastP, this.curBuy, this.curSell);
+
+        // fill gaps
+        const gap = sec - s;
+        if (gap > 1) {
+          const fillMax = 30; // safety cap
+          const fillTo = Math.min(sec-1, s + fillMax);
+          for (let t = s + 1; t <= fillTo; t++) {
+            this.flushSecond(t, lastP, 0, 0);
+          }
+        }
+
+        // reset for current sec
+        this.curSec = sec;
+        this.curPrice = price;
+        this.curBuy = 0;
+        this.curSell = 0;
+        if (isBuyerMaker) this.curSell += qty;
+        else this.curBuy += qty;
+
+        this.prune(sec);
+      }
+
+      onDepth10(eventMs, bids, asks) {
+        const sec = Math.floor(eventMs / 1000);
+        let sumB = 0, sumA = 0;
+        try {
+          for (let i=0; i<Math.min(10, bids.length); i++) sumB += Number(bids[i][1]);
+          for (let i=0; i<Math.min(10, asks.length); i++) sumA += Number(asks[i][1]);
+        } catch {
+          return;
+        }
+        const imb = (sumB - sumA) / (sumB + sumA + EPS);
+        this.imb.push({t: sec, v: imb});
+        this.prune(sec);
+      }
+
+      priceAtOrAfter(targetSec) {
+        // semantics: first price sample with t >= target
+        for (const x of this.prices) {
+          if (x.t >= targetSec) return x.p;
+        }
+        return null;
+      }
+
+      valuesSince(arr, cutoffSec, field) {
+        const out = [];
+        for (const x of arr) {
+          if (x.t >= cutoffSec) out.push(x[field]);
+        }
+        return out;
+      }
+
+      compute(nowSec) {
+        if (this.prices.length === 0) return null;
+
+        this.prune(nowSec);
+
+        const pNow = this.prices[this.prices.length-1].p;
+        if (!(pNow > 0)) return null;
+
+        // Momentum short/long
+        const pS = this.priceAtOrAfter(nowSec - P.mom_short_s);
+        if (!(pS > 0)) return null;
+        const rS = Math.log(pNow / (pS + EPS));
+        const momS = tanhScoreSigned(rS, P.k_m_short);
+
+        const pL = this.priceAtOrAfter(nowSec - P.mom_long_s);
+        let mom = momS;
+        if (pL && pL > 0) {
+          const rL = Math.log(pNow / (pL + EPS));
+          const momL = tanhScoreSigned(rL, P.k_m_long);
+          const a = clamp(P.mom_blend_short, 0, 1);
+          mom = a * momS + (1 - a) * momL;
+        }
+
+        // Volatility short/long
+        const retsS = this.valuesSince(this.rets, nowSec - P.vol_short_s, "r");
+        const volS = std(retsS);
+        const volScoreS = tanhScoreNegative(volS, P.k_v_short);
+
+        const retsL = this.valuesSince(this.rets, nowSec - P.vol_long_s, "r");
+        const volL = retsL.length ? std(retsL) : volS;
+        const volScoreL = tanhScoreNegative(volL, P.k_v_long);
+
+        const av = clamp(P.vol_blend_short, 0, 1);
+        const vol = av * volScoreS + (1 - av) * volScoreL;
+
+        // Order book score (mean imbalance)
+        const imbs = this.valuesSince(this.imb, nowSec - P.imb_window_s, "v");
+        let ob = 50;
+        if (imbs.length) {
+          const mean = imbs.reduce((a,b)=>a+b,0) / imbs.length;
+          ob = clamp(50 + 50 * mean);
+        }
+
+        // Aggression score (buy taker ratio)
+        const buys = this.valuesSince(this.buy1s, nowSec - P.aggr_window_s, "v");
+        const sells = this.valuesSince(this.sell1s, nowSec - P.aggr_window_s, "v");
+        const bSum = buys.reduce((a,b)=>a+b,0);
+        const sSum = sells.reduce((a,b)=>a+b,0);
+        let aggr = 50;
+        if ((bSum + sSum) > 0) aggr = clamp(100 * (bSum / (bSum + sSum + EPS)));
+
+        const asset =
+          P.w_mom * mom +
+          P.w_vol * vol +
+          P.w_ob * ob +
+          P.w_aggr * aggr;
+
+        return {
+          symbol: this.symbol,
+          t_sec: nowSec,
+          price: pNow,
+          mom, vol, ob, aggr,
+          asset: clamp(asset),
+        };
+      }
+    }
+
+    // ----------------------------
+    // Engine
+    // ----------------------------
+    const states = {};
+    for (const s of SYMBOLS) states[s] = new SymbolState(s);
+
+    // weight sanity check
+    const wSum = SYMBOLS.reduce((a,s)=>a+(WEIGHTS[s]||0), 0);
+    if (Math.abs(wSum - 1.0) > 1e-6) {
+      alert("WEIGHTS must sum to 1.0. Currently: " + wSum);
+    }
+
+    let prevBasket = 50.0;
+    const history = []; // {t, fgi, raw}
+
+    // ----------------------------
+    // WebSocket (single combined stream)
+    // ----------------------------
+    let ws = null;
+    let wsBackoffMs = 500;
+
+    function setConn(status) {
+      const el = document.getElementById("conn");
+      el.textContent = status;
+      el.style.background = (status === "connected") ? "#eef9ee" : "#fff3f3";
+      el.style.borderColor = (status === "connected") ? "#b8e0b8" : "#f0b5b5";
+    }
+
+    function connectWS() {
+      const streams = [];
+      for (const sym of SYMBOLS) {
+        const s = sym.toLowerCase();
+        streams.push(`${s}@aggTrade`);
+        streams.push(`${s}@depth10@100ms`);
+      }
+      const url = `wss://stream.binance.com:9443/stream?streams=${streams.join("/")}`;
+
+      ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        setConn("connected");
+        wsBackoffMs = 500;
+      };
+
+      ws.onclose = () => {
+        setConn("disconnected");
+        setTimeout(connectWS, wsBackoffMs);
+        wsBackoffMs = Math.min(15000, wsBackoffMs * 1.5);
+      };
+
+      ws.onerror = () => {
+        try { ws.close(); } catch {}
+      };
+
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        const stream = msg.stream || "";
+        const d = msg.data || {};
+
+        // aggTrade fields: E, p, q, m
+        if (stream.endsWith("@aggTrade")) {
+          const sym = (d.s || "").toUpperCase();
+          if (!states[sym]) return;
+          states[sym].onAggTrade(Number(d.E), Number(d.p), Number(d.q), Boolean(d.m));
+          return;
+        }
+
+        // depth10 fields: E, b, a
+        if (stream.includes("@depth10")) {
+          const sym = (d.s || "").toUpperCase();
+          if (!states[sym]) return;
+          states[sym].onDepth10(Number(d.E), d.b || [], d.a || []);
+          return;
+        }
+      };
+    }
+
+    // ----------------------------
+    // UI (chart + table)
+    // ----------------------------
+    let chart = null;
+
+    function initChart() {
+      const ctx = document.getElementById("chart").getContext("2d");
+      chart = new Chart(ctx, {
+        type: "line",
+        data: {
+          labels: [],
+          datasets: [{
+            label: "FGI",
+            data: [],
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.25
+          }]
+        },
+        options: {
+          responsive: true,
+          animation: false,
+          scales: { y: { min: 0, max: 100 } }
+        }
+      });
+    }
+
+    function updateUI(snapshot) {
+      const fgiEl = document.getElementById("fgi");
+      fgiEl.textContent = fmt(snapshot.fgi, 2);
+      fgiEl.style.color = colorForFGI(snapshot.fgi);
+
+      const dt = new Date(snapshot.t_sec * 1000);
+      document.getElementById("meta").textContent =
+        `raw=${fmt(snapshot.fgi_raw,2)} | ${dt.toLocaleString()} | alpha=${BASKET_ALPHA}`;
+
+      // table
+      const rows = document.getElementById("rows");
+      rows.innerHTML = "";
+
+      const keys = Object.keys(snapshot.assets).sort();
+      for (const k of keys) {
+        const a = snapshot.assets[k];
+        const tr = document.createElement("tr");
+        tr.innerHTML =
+          `<td>${k}</td>` +
+          `<td>${fmt(a.price, 2)}</td>` +
+          `<td>${fmt(a.asset, 2)}</td>` +
+          `<td>${fmt(a.mom, 2)}</td>` +
+          `<td>${fmt(a.vol, 2)}</td>` +
+          `<td>${fmt(a.ob, 2)}</td>` +
+          `<td>${fmt(a.aggr, 2)}</td>`;
+        rows.appendChild(tr);
+      }
+
+      // chart
+      if (chart) {
+        chart.data.labels.push(dt.toLocaleTimeString());
+        chart.data.datasets[0].data.push(snapshot.fgi);
+
+        const maxPts = 300;
+        if (chart.data.labels.length > maxPts) {
+          chart.data.labels.shift();
+          chart.data.datasets[0].data.shift();
+        }
+        chart.update("none");
+      }
+    }
+
+    // ----------------------------
+    // Compute loop
+    // ----------------------------
+    function computeOnce() {
+      const nowSec = Math.floor(Date.now() / 1000);
+
+      const assets = {};
+      let total = 0;
+      let used = 0;
+
+      for (const sym of SYMBOLS) {
+        const sc = states[sym].compute(nowSec);
+        if (!sc) continue;
+
+        assets[sym] = sc;
+        const w = Number(WEIGHTS[sym] || 0);
+        total += w * sc.asset;
+        used += w;
+      }
+
+      if (used <= 0) return null;
+
+      const fgiRaw = clamp(total / (used + EPS));
+      const fgi = clamp(BASKET_ALPHA * fgiRaw + (1 - BASKET_ALPHA) * prevBasket);
+      prevBasket = fgi;
+
+      const snapshot = { t_sec: nowSec, fgi_raw: fgiRaw, fgi, assets };
+
+      history.push({t_sec: nowSec, fgi, fgi_raw: fgiRaw});
+      if (history.length > 2000) history.shift();
+
+      return snapshot;
+    }
+
+    // ----------------------------
+    // Boot
+    // ----------------------------
+    initChart();
+    setConn("disconnected");
+    connectWS();
+
+    // First paint once data is available
+    setInterval(() => {
+      const snap = computeOnce();
+      if (snap) updateUI(snap);
+    }, UPDATE_EVERY_MS);
+  </script>
+</body>
+</html>
