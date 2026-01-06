@@ -57,6 +57,88 @@
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
+
+// ----------------------------
+// 24h persistent history (IndexedDB)
+// ----------------------------
+const HISTORY_KEEP_S = 24 * 3600; // 24 hours
+const DB_NAME = "live_fgi_db";
+const DB_VERSION = 1;
+const STORE = "fgi_points";
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) {
+        const os = db.createObjectStore(STORE, { keyPath: "t_sec" });
+        os.createIndex("t_sec", "t_sec", { unique: true });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbPutPoint(db, point) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).put(point);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function dbDeleteOlderThan(db, cutoffSec) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    const store = tx.objectStore(STORE);
+    const idx = store.index("t_sec");
+
+    // Iterate from oldest up to cutoff
+    const range = IDBKeyRange.upperBound(cutoffSec, true);
+    const cursorReq = idx.openCursor(range);
+
+    cursorReq.onsuccess = (ev) => {
+      const cursor = ev.target.result;
+      if (!cursor) return;
+      store.delete(cursor.primaryKey);
+      cursor.continue();
+    };
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function dbLoadLast24h(db, cutoffSec) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const store = tx.objectStore(STORE);
+    const idx = store.index("t_sec");
+
+    const range = IDBKeyRange.lowerBound(cutoffSec, true);
+    const req = idx.getAll(range);
+
+    req.onsuccess = () => {
+      // sorted by keyPath (t_sec) ascending
+      resolve(req.result || []);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+
+
+
+
+
+
+
+
+
+
     // ----------------------------
     // Config
     // ----------------------------
@@ -528,7 +610,10 @@
       const snapshot = { t_sec: nowSec, fgi_raw: fgiRaw, fgi, assets };
 
       history.push({t_sec: nowSec, fgi, fgi_raw: fgiRaw});
-      if (history.length > 2000) history.shift();
+      // Keep only last 24 hours in memory
+const cutoff = nowSec - HISTORY_KEEP_S;
+while (history.length && history[0].t_sec < cutoff) history.shift();
+
 
       return snapshot;
     }
@@ -536,10 +621,76 @@
     // ----------------------------
     // Boot
     // ----------------------------
+
+
+
+
+let db = null;
+
+async function initPersistentHistory() {
+  db = await openDB();
+  const nowSec = Math.floor(Date.now() / 1000);
+  const cutoff = nowSec - HISTORY_KEEP_S;
+
+  const points = await dbLoadLast24h(db, cutoff);
+
+  // Replace your in-memory history with the persisted points
+  history.length = 0;
+  for (const p of points) history.push(p);
+
+  // Seed prevBasket from the most recent stored fgi so EMA continues smoothly
+  if (history.length) {
+    prevBasket = history[history.length - 1].fgi;
+  }
+
+  // Pre-fill chart with stored history
+  for (const p of history.slice(-300)) {
+    const dt = new Date(p.t_sec * 1000);
+    chart.data.labels.push(dt.toLocaleTimeString());
+    chart.data.datasets[0].data.push(p.fgi);
+  }
+  chart.update("none");
+}
+
+
+    
     initChart();
     setConn("disconnected");
     connectWS();
 
+(async () => {
+  initChart();
+  setConn("disconnected");
+  connectWS();
+  await initPersistentHistory();
+
+  setInterval(async () => {
+    const snap = computeOnce();
+    if (snap) {
+      updateUI(snap);
+
+      // Persist only the minimal point
+      const point = { t_sec: snap.t_sec, fgi: snap.fgi, fgi_raw: snap.fgi_raw };
+
+      // Save + prune in background (still on main thread, but fast)
+      if (db) {
+        await dbPutPoint(db, point);
+
+        // prune once per minute (avoid doing it every 5 seconds)
+        if (!window._lastPrune || (Date.now() - window._lastPrune) > 60_000) {
+          window._lastPrune = Date.now();
+          const cutoff = Math.floor(Date.now() / 1000) - HISTORY_KEEP_S;
+          await dbDeleteOlderThan(db, cutoff);
+        }
+      }
+    }
+  }, UPDATE_EVERY_MS);
+})();
+
+
+
+
+    
     // First paint once data is available
     setInterval(() => {
       const snap = computeOnce();
