@@ -74,7 +74,7 @@
     const UPDATE_EVERY_MS = 5000;
 
     // Basket EMA smoothing for display
-    const BASKET_ALPHA = 0.20; // reduce for smoother, increase for faster
+    const BASKET_ALPHA = 0.001; // reduce for smoother, increase for faster
 
     // FGI core parameters (seconds)
     const P = {
@@ -83,7 +83,7 @@
       vol_short_s: 240,
       vol_long_s: 3600,
       imb_window_s: 20,
-      aggr_window_s: 1200,
+      aggr_window_s: 600,
 
       k_m_short: 0.005,
       k_m_long: 0.02,
@@ -411,19 +411,22 @@
 
         // aggTrade fields: E, p, q, m
         if (stream.endsWith("@aggTrade")) {
-          const sym = (d.s || "").toUpperCase();
+          const sym = stream.split("@")[0].toUpperCase();
           if (!states[sym]) return;
           states[sym].onAggTrade(Number(d.E), Number(d.p), Number(d.q), Boolean(d.m));
           return;
         }
 
+
         // depth10 fields: E, b, a
         if (stream.includes("@depth10")) {
-          const sym = (d.s || "").toUpperCase();
+          // stream looks like "btcusdt@depth10@100ms"
+          const sym = stream.split("@")[0].toUpperCase();
           if (!states[sym]) return;
           states[sym].onDepth10(Number(d.E), d.b || [], d.a || []);
           return;
         }
+
       };
     }
 
