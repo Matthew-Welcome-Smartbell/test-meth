@@ -84,7 +84,7 @@
     const CHART_POINT_SECONDS = 60;
 
     // Basket EMA smoothing for live display (not for backfill series)
-    const BASKET_ALPHA_LIVE = 0.20;
+    const BASKET_ALPHA_LIVE = 0.10;
 
     // FGI core parameters (seconds)
     const P = {
@@ -611,8 +611,23 @@
 
         if (used <= 0) continue;
 
-        const fgiRaw = clamp(total / (used + EPS));
+        //const fgiRaw = clamp(total / (used + EPS));
+
+
         // For backfill, keep "raw" as the 1/min point; if you want smoothing, apply an EMA here.
+                let prev = 50.0; // or seed with first fgiRaw when available
+        for (const ts of commonT) {
+          
+          const fgiRaw = clamp(total / (used + EPS));
+
+          const fgi = clamp(0.20 * fgiRaw + 0.80 * prev);
+          prev = fgi;
+
+          out.push({ t_sec: ts, fgi_raw: fgiRaw, fgi });
+        }
+
+
+
         out.push({ t_sec: ts, fgi_raw: fgiRaw, fgi: fgiRaw });
       }
 
