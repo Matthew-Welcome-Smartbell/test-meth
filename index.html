@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Live Crypto FGI</title>
+  <title>Live Crypto FGI (24h Backfill, No Storage)</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 16px; }
     .card { border: 1px solid #ddd; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
@@ -17,6 +17,7 @@
     canvas { width: 100%; max-height: 320px; }
     .small { font-size: 12px; }
     code { background:#f7f7f7; padding:2px 4px; border-radius:6px; }
+    .warn { color: #8a5a00; }
   </style>
 </head>
 <body>
@@ -24,27 +25,32 @@
   <div class="card">
     <div class="row">
       <div class="col">
-        <div class="muted">Basket FGI (updates every 5s)</div>
+        <div class="muted">Basket FGI (live updates every 5s; chart is 1/min)</div>
         <div id="fgi" class="big">--</div>
         <div id="meta" class="muted small"></div>
+        <div id="backfill" class="muted small"></div>
+        <div class="small warn" style="margin-top:6px;">
+          Note: historical order book isn’t available from Binance; OB uses a candle-based proxy for the 24h backfill.
+        </div>
       </div>
       <div class="col">
         <div class="muted">Connection</div>
         <div id="conn" class="pill">disconnected</div>
         <div class="muted small" style="margin-top:8px;">
-          Streams: <code>aggTrade</code> + <code>depth10</code> for BTC/ETH/XRP/SOL
+          REST backfill: <code>/api/v3/klines</code> (1m)<br/>
+          Live: <code>aggTrade</code> + <code>depth10</code>
         </div>
       </div>
     </div>
   </div>
 
   <div class="card">
-    <div class="muted">FGI history</div>
+    <div class="muted">FGI history (last 24h, 1 point/min)</div>
     <canvas id="chart"></canvas>
   </div>
 
   <div class="card">
-    <div class="muted">Per-asset components</div>
+    <div class="muted">Per-asset components (live, computed from WS)</div>
     <table>
       <thead>
         <tr>
@@ -57,88 +63,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
-
-// ----------------------------
-// 24h persistent history (IndexedDB)
-// ----------------------------
-const HISTORY_KEEP_S = 24 * 3600; // 24 hours
-const DB_NAME = "live_fgi_db";
-const DB_VERSION = 1;
-const STORE = "fgi_points";
-
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE)) {
-        const os = db.createObjectStore(STORE, { keyPath: "t_sec" });
-        os.createIndex("t_sec", "t_sec", { unique: true });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function dbPutPoint(db, point) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).put(point);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function dbDeleteOlderThan(db, cutoffSec) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
-    const store = tx.objectStore(STORE);
-    const idx = store.index("t_sec");
-
-    // Iterate from oldest up to cutoff
-    const range = IDBKeyRange.upperBound(cutoffSec, true);
-    const cursorReq = idx.openCursor(range);
-
-    cursorReq.onsuccess = (ev) => {
-      const cursor = ev.target.result;
-      if (!cursor) return;
-      store.delete(cursor.primaryKey);
-      cursor.continue();
-    };
-
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function dbLoadLast24h(db, cutoffSec) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readonly");
-    const store = tx.objectStore(STORE);
-    const idx = store.index("t_sec");
-
-    const range = IDBKeyRange.lowerBound(cutoffSec, true);
-    const req = idx.getAll(range);
-
-    req.onsuccess = () => {
-      // sorted by keyPath (t_sec) ascending
-      resolve(req.result || []);
-    };
-    req.onerror = () => reject(req.error);
-  });
-}
-
-
-
-
-
-
-
-
-
-
-
     // ----------------------------
     // Config
     // ----------------------------
@@ -152,11 +76,14 @@ async function dbLoadLast24h(db, cutoffSec) {
       "SOLUSDT": 0.25,
     };
 
-    // Compute/publish cadence
-    const UPDATE_EVERY_MS = 5000;
+    // Live compute cadence (display updates)
+    const LIVE_UPDATE_EVERY_MS = 5000;
 
-    // Basket EMA smoothing for display
-    const BASKET_ALPHA = 0.1; // reduce for smoother, increase for faster
+    // Chart cadence: 1 point per minute
+    const CHART_POINT_SECONDS = 60;
+
+    // Basket EMA smoothing for live display (not for backfill series)
+    const BASKET_ALPHA_LIVE = 0.20;
 
     // FGI core parameters (seconds)
     const P = {
@@ -165,7 +92,7 @@ async function dbLoadLast24h(db, cutoffSec) {
       vol_short_s: 240,
       vol_long_s: 3600,
       imb_window_s: 20,
-      aggr_window_s: 600,
+      aggr_window_s: 1200,
 
       k_m_short: 0.005,
       k_m_long: 0.02,
@@ -181,11 +108,11 @@ async function dbLoadLast24h(db, cutoffSec) {
       w_aggr: 0.20,
     };
 
+    const EPS = 1e-12;
+
     // ----------------------------
     // Helpers
     // ----------------------------
-    const EPS = 1e-12;
-
     function clamp(x, lo=0, hi=100) {
       x = Number(x);
       if (!Number.isFinite(x)) return lo;
@@ -201,7 +128,6 @@ async function dbLoadLast24h(db, cutoffSec) {
     }
 
     function std(arr) {
-      // simple 2-pass std; arr is JS array of numbers
       const n = arr.length;
       if (n === 0) return 0;
       let mean = 0;
@@ -227,18 +153,191 @@ async function dbLoadLast24h(db, cutoffSec) {
       return "black";
     }
 
+    function setConn(status) {
+      const el = document.getElementById("conn");
+      el.textContent = status;
+      el.style.background = (status === "connected") ? "#eef9ee" : "#fff3f3";
+      el.style.borderColor = (status === "connected") ? "#b8e0b8" : "#f0b5b5";
+    }
+
     // ----------------------------
-    // Per-symbol rolling state (1s buckets)
+    // Binance REST backfill (1m klines)
     // ----------------------------
-    class SymbolState {
+    async function fetchKlines(symbol, interval, startMs, endMs) {
+      const url = new URL("https://api.binance.com/api/v3/klines");
+      url.searchParams.set("symbol", symbol);
+      url.searchParams.set("interval", interval);
+      url.searchParams.set("startTime", String(startMs));
+      url.searchParams.set("endTime", String(endMs));
+      url.searchParams.set("limit", "1000");
+
+      const res = await fetch(url.toString(), { method: "GET" });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`Klines fetch failed ${res.status}: ${txt}`);
+      }
+      return await res.json(); // array of arrays
+    }
+
+    async function fetchLast24h1m(symbol) {
+      const now = Date.now();
+      const start = now - 24 * 3600 * 1000;
+
+      // Need up to 1440 points; API limit 1000, so do two chunks.
+      const mid = start + 1000 * 60 * 1000; // start + 1000 minutes
+
+      const part1 = await fetchKlines(symbol, "1m", start, mid);
+      // slight overlap tolerance; use mid..now for part2
+      const part2 = await fetchKlines(symbol, "1m", mid, now);
+
+      // Merge + de-dup by openTime
+      const map = new Map();
+      for (const k of [...part1, ...part2]) map.set(k[0], k);
+      const merged = Array.from(map.entries())
+        .sort((a,b) => a[0] - b[0])
+        .map(e => e[1]);
+
+      // Keep only last 24h window strictly
+      return merged.filter(k => k[0] >= start && k[0] <= now);
+    }
+
+    // Convert klines to series needed for scoring
+    // Binance kline format:
+    // [
+    //  0 openTime, 1 open, 2 high, 3 low, 4 close, 5 volume,
+    //  6 closeTime, 7 quoteAssetVolume, 8 numberOfTrades,
+    //  9 takerBuyBaseAssetVolume, 10 takerBuyQuoteAssetVolume, 11 ignore
+    // ]
+    function klinesToSeries(klines) {
+      const t = [];
+      const open = [];
+      const high = [];
+      const low = [];
+      const close = [];
+      const vol = [];
+      const takerBuy = [];
+
+      for (const k of klines) {
+        t.push(Math.floor(Number(k[0]) / 1000)); // seconds
+        open.push(Number(k[1]));
+        high.push(Number(k[2]));
+        low.push(Number(k[3]));
+        close.push(Number(k[4]));
+        vol.push(Number(k[5]));
+        takerBuy.push(Number(k[9]));
+      }
+      return { t, open, high, low, close, vol, takerBuy };
+    }
+
+    // Compute per-minute asset scores from 1m candle data (approx core logic)
+    function computeAssetFrom1m(series) {
+      const { t, open, high, low, close, vol, takerBuy } = series;
+      const n = t.length;
+
+      const ret = new Array(n).fill(NaN);
+      for (let i=1; i<n; i++) {
+        const p0 = close[i-1], p1 = close[i];
+        if (p0 > 0 && p1 > 0) ret[i] = Math.log(p1 / (p0 + EPS));
+      }
+
+      // Convert windows from seconds -> minutes (at least 1)
+      const ms = Math.max(1, Math.round(P.mom_short_s / 60));
+      const ml = Math.max(1, Math.round(P.mom_long_s / 60));
+      const vs = Math.max(1, Math.round(P.vol_short_s / 60));
+      const vl = Math.max(1, Math.round(P.vol_long_s / 60));
+      const iw = Math.max(1, Math.round(P.imb_window_s / 60));
+      const aw = Math.max(1, Math.round(P.aggr_window_s / 60));
+
+      const mom = new Array(n).fill(NaN);
+      const volScore = new Array(n).fill(NaN);
+      const ob = new Array(n).fill(NaN);
+      const aggr = new Array(n).fill(NaN);
+      const asset = new Array(n).fill(NaN);
+
+      // Candle-based OB proxy imbalance in [-1,1]:
+      // imb_proxy = (close - open) / (high - low)
+      const imbProxy = new Array(n).fill(0);
+      for (let i=0; i<n; i++) {
+        const rng = (high[i] - low[i]);
+        if (rng > 0) imbProxy[i] = Math.max(-1, Math.min(1, (close[i] - open[i]) / (rng + EPS)));
+        else imbProxy[i] = 0;
+      }
+
+      for (let i=0; i<n; i++) {
+        // Momentum short
+        if (i - ms >= 0 && close[i-ms] > 0 && close[i] > 0) {
+          const rS = Math.log(close[i] / (close[i-ms] + EPS));
+          const momS = tanhScoreSigned(rS, P.k_m_short);
+
+          let momVal = momS;
+          if (i - ml >= 0 && close[i-ml] > 0) {
+            const rL = Math.log(close[i] / (close[i-ml] + EPS));
+            const momL = tanhScoreSigned(rL, P.k_m_long);
+            const a = clamp(P.mom_blend_short, 0, 1);
+            momVal = a * momS + (1 - a) * momL;
+          }
+          mom[i] = momVal;
+        }
+
+        // Volatility short/long (std of log returns)
+        const retsS = [];
+        for (let j=Math.max(1, i - vs + 1); j<=i; j++) if (Number.isFinite(ret[j])) retsS.push(ret[j]);
+        const volS = std(retsS);
+        const volSScore = tanhScoreNegative(volS, P.k_v_short);
+
+        const retsL = [];
+        for (let j=Math.max(1, i - vl + 1); j<=i; j++) if (Number.isFinite(ret[j])) retsL.push(ret[j]);
+        const volL = retsL.length ? std(retsL) : volS;
+        const volLScore = tanhScoreNegative(volL, P.k_v_long);
+
+        const aV = clamp(P.vol_blend_short, 0, 1);
+        volScore[i] = aV * volSScore + (1 - aV) * volLScore;
+
+        // OB proxy: rolling mean imbalance
+        let sumImb = 0, cntImb = 0;
+        for (let j=Math.max(0, i - iw + 1); j<=i; j++) { sumImb += imbProxy[j]; cntImb++; }
+        ob[i] = clamp(50 + 50 * (cntImb ? (sumImb / cntImb) : 0));
+
+        // Aggression proxy: taker buy ratio (takerBuyBase / volume)
+        let bSum = 0, vSum = 0;
+        for (let j=Math.max(0, i - aw + 1); j<=i; j++) {
+          bSum += takerBuy[j];
+          vSum += vol[j];
+        }
+        aggr[i] = (vSum > 0) ? clamp(100 * (bSum / (vSum + EPS))) : 50;
+
+        if (Number.isFinite(mom[i])) {
+          asset[i] = clamp(
+            P.w_mom * mom[i] +
+            P.w_vol * volScore[i] +
+            P.w_ob  * ob[i] +
+            P.w_aggr * aggr[i]
+          );
+        }
+      }
+
+      return { t, close, mom, vol: volScore, ob, aggr, asset };
+    }
+
+    // ----------------------------
+    // Live WS state (for live per-asset table + current FGI)
+    // ----------------------------
+    class Rolling1s {
+      constructor() { this.arr = []; } // {t, v}
+      push(t, v) { this.arr.push({t, v}); }
+      prune(cutoff) { while (this.arr.length && this.arr[0].t < cutoff) this.arr.shift(); }
+      valuesSince(cutoff) { return this.arr.filter(x => x.t >= cutoff).map(x => x.v); }
+      latest() { return this.arr.length ? this.arr[this.arr.length-1].v : null; }
+    }
+
+    class LiveSymbolState {
       constructor(symbol) {
         this.symbol = symbol;
-
-        this.prices = [];   // [{t, p}]
-        this.rets = [];     // [{t, r}]
-        this.buy1s = [];    // [{t, v}]
-        this.sell1s = [];   // [{t, v}]
-        this.imb = [];      // [{t, v}] v in [-1,1]
+        this.prices = new Rolling1s(); // store per-second last price
+        this.rets = new Rolling1s();   // per-second log returns
+        this.buy1s = new Rolling1s();
+        this.sell1s = new Rolling1s();
+        this.imb = new Rolling1s();    // signed imbalance [-1,1] from depth10
 
         this.curSec = null;
         this.curPrice = null;
@@ -246,45 +345,35 @@ async function dbLoadLast24h(db, cutoffSec) {
         this.curSell = 0;
 
         this.lastPrice = null;
+        this._lastRetPrice = null;
+        this._lastRetSec = null;
       }
 
-      maxKeepSeconds() {
+      keepSec() {
         return Math.max(P.mom_long_s, P.vol_long_s, P.aggr_window_s, P.imb_window_s, 600) + 60;
       }
 
       prune(nowSec) {
-        const cutoff = nowSec - this.maxKeepSeconds();
-
-        const pruneArr = (arr) => {
-          while (arr.length && arr[0].t < cutoff) arr.shift();
-        };
-
-        pruneArr(this.prices);
-        pruneArr(this.rets);
-        pruneArr(this.buy1s);
-        pruneArr(this.sell1s);
-
-        // imbalance only needs short window + buffer
-        const cutoffImb = nowSec - (P.imb_window_s + 120);
-        while (this.imb.length && this.imb[0].t < cutoffImb) this.imb.shift();
+        const cutoff = nowSec - this.keepSec();
+        this.prices.prune(cutoff);
+        this.rets.prune(cutoff);
+        this.buy1s.prune(cutoff);
+        this.sell1s.prune(cutoff);
+        this.imb.prune(nowSec - (P.imb_window_s + 120));
       }
 
       flushSecond(sec, price, buyQty, sellQty) {
-        // append price
-        this.prices.push({t: sec, p: price});
+        this.prices.push(sec, price);
 
-        // compute return vs previous price
-        const n = this.prices.length;
-        if (n >= 2) {
-          const pPrev = this.prices[n-2].p;
-          if (pPrev > 0 && price > 0) {
-            const r = Math.log(price / (pPrev + EPS));
-            this.rets.push({t: sec, r});
-          }
+        // return vs previous second price sample
+        if (this._lastRetPrice != null && this._lastRetPrice > 0 && price > 0) {
+          this.rets.push(sec, Math.log(price / (this._lastRetPrice + EPS)));
         }
+        this._lastRetPrice = price;
+        this._lastRetSec = sec;
 
-        this.buy1s.push({t: sec, v: buyQty});
-        this.sell1s.push({t: sec, v: sellQty});
+        this.buy1s.push(sec, buyQty);
+        this.sell1s.push(sec, sellQty);
       }
 
       onAggTrade(eventMs, price, qty, isBuyerMaker) {
@@ -307,23 +396,19 @@ async function dbLoadLast24h(db, cutoffSec) {
           return;
         }
 
-        // If we skipped seconds, fill missing seconds with last known price and zero volume.
-        // This makes horizons behave more consistently.
-        let s = this.curSec;
-        const lastP = Number(this.curPrice ?? price);
-        this.flushSecond(s, lastP, this.curBuy, this.curSell);
+        // flush previous second
+        this.flushSecond(this.curSec, Number(this.curPrice ?? price), this.curBuy, this.curSell);
 
-        // fill gaps
-        const gap = sec - s;
+        // fill small gaps (cap)
+        const gap = sec - this.curSec;
+        const fillMax = 30;
         if (gap > 1) {
-          const fillMax = 30; // safety cap
-          const fillTo = Math.min(sec-1, s + fillMax);
-          for (let t = s + 1; t <= fillTo; t++) {
-            this.flushSecond(t, lastP, 0, 0);
-          }
+          const lastP = Number(this.curPrice ?? price);
+          const fillTo = Math.min(sec - 1, this.curSec + fillMax);
+          for (let s=this.curSec + 1; s<=fillTo; s++) this.flushSecond(s, lastP, 0, 0);
         }
 
-        // reset for current sec
+        // reset current
         this.curSec = sec;
         this.curPrice = price;
         this.curBuy = 0;
@@ -337,49 +422,36 @@ async function dbLoadLast24h(db, cutoffSec) {
       onDepth10(eventMs, bids, asks) {
         const sec = Math.floor(eventMs / 1000);
         let sumB = 0, sumA = 0;
-        try {
-          for (let i=0; i<Math.min(10, bids.length); i++) sumB += Number(bids[i][1]);
-          for (let i=0; i<Math.min(10, asks.length); i++) sumA += Number(asks[i][1]);
-        } catch {
-          return;
-        }
+        for (let i=0; i<Math.min(10, bids.length); i++) sumB += Number(bids[i][1]);
+        for (let i=0; i<Math.min(10, asks.length); i++) sumA += Number(asks[i][1]);
         const imb = (sumB - sumA) / (sumB + sumA + EPS);
-        this.imb.push({t: sec, v: imb});
+        this.imb.push(sec, imb);
         this.prune(sec);
       }
 
       priceAtOrAfter(targetSec) {
-        // semantics: first price sample with t >= target
-        for (const x of this.prices) {
-          if (x.t >= targetSec) return x.p;
+        // first price with t >= target
+        for (const x of this.prices.arr) {
+          if (x.t >= targetSec) return x.v;
         }
         return null;
       }
 
-      valuesSince(arr, cutoffSec, field) {
-        const out = [];
-        for (const x of arr) {
-          if (x.t >= cutoffSec) out.push(x[field]);
-        }
-        return out;
-      }
-
       compute(nowSec) {
-        if (this.prices.length === 0) return null;
-
         this.prune(nowSec);
 
-        const pNow = this.prices[this.prices.length-1].p;
+        const pNow = this.prices.latest();
         if (!(pNow > 0)) return null;
 
         // Momentum short/long
         const pS = this.priceAtOrAfter(nowSec - P.mom_short_s);
         if (!(pS > 0)) return null;
+
         const rS = Math.log(pNow / (pS + EPS));
         const momS = tanhScoreSigned(rS, P.k_m_short);
 
-        const pL = this.priceAtOrAfter(nowSec - P.mom_long_s);
         let mom = momS;
+        const pL = this.priceAtOrAfter(nowSec - P.mom_long_s);
         if (pL && pL > 0) {
           const rL = Math.log(pNow / (pL + EPS));
           const momL = tanhScoreSigned(rL, P.k_m_long);
@@ -387,136 +459,51 @@ async function dbLoadLast24h(db, cutoffSec) {
           mom = a * momS + (1 - a) * momL;
         }
 
-        // Volatility short/long
-        const retsS = this.valuesSince(this.rets, nowSec - P.vol_short_s, "r");
+        // Vol
+        const retsS = this.rets.valuesSince(nowSec - P.vol_short_s);
         const volS = std(retsS);
-        const volScoreS = tanhScoreNegative(volS, P.k_v_short);
+        const volSScore = tanhScoreNegative(volS, P.k_v_short);
 
-        const retsL = this.valuesSince(this.rets, nowSec - P.vol_long_s, "r");
+        const retsL = this.rets.valuesSince(nowSec - P.vol_long_s);
         const volL = retsL.length ? std(retsL) : volS;
-        const volScoreL = tanhScoreNegative(volL, P.k_v_long);
+        const volLScore = tanhScoreNegative(volL, P.k_v_long);
 
-        const av = clamp(P.vol_blend_short, 0, 1);
-        const vol = av * volScoreS + (1 - av) * volScoreL;
+        const aV = clamp(P.vol_blend_short, 0, 1);
+        const vol = aV * volSScore + (1 - aV) * volLScore;
 
-        // Order book score (mean imbalance)
-        const imbs = this.valuesSince(this.imb, nowSec - P.imb_window_s, "v");
+        // OB (real, from depth10 imbalance)
+        const imbs = this.imb.valuesSince(nowSec - P.imb_window_s);
         let ob = 50;
         if (imbs.length) {
           const mean = imbs.reduce((a,b)=>a+b,0) / imbs.length;
           ob = clamp(50 + 50 * mean);
         }
 
-        // Aggression score (buy taker ratio)
-        const buys = this.valuesSince(this.buy1s, nowSec - P.aggr_window_s, "v");
-        const sells = this.valuesSince(this.sell1s, nowSec - P.aggr_window_s, "v");
+        // Aggression (real, from taker buy vs sell 1s)
+        const buys = this.buy1s.valuesSince(nowSec - P.aggr_window_s);
+        const sells = this.sell1s.valuesSince(nowSec - P.aggr_window_s);
         const bSum = buys.reduce((a,b)=>a+b,0);
         const sSum = sells.reduce((a,b)=>a+b,0);
-        let aggr = 50;
-        if ((bSum + sSum) > 0) aggr = clamp(100 * (bSum / (bSum + sSum + EPS)));
+        const aggr = (bSum + sSum > 0) ? clamp(100 * (bSum / (bSum + sSum + EPS))) : 50;
 
-        const asset =
+        const asset = clamp(
           P.w_mom * mom +
           P.w_vol * vol +
-          P.w_ob * ob +
-          P.w_aggr * aggr;
+          P.w_ob  * ob +
+          P.w_aggr * aggr
+        );
 
-        return {
-          symbol: this.symbol,
-          t_sec: nowSec,
-          price: pNow,
-          mom, vol, ob, aggr,
-          asset: clamp(asset),
-        };
+        return { symbol: this.symbol, t_sec: nowSec, price: pNow, mom, vol, ob, aggr, asset };
       }
     }
 
-    // ----------------------------
-    // Engine
-    // ----------------------------
-    const states = {};
-    for (const s of SYMBOLS) states[s] = new SymbolState(s);
-
-    // weight sanity check
-    const wSum = SYMBOLS.reduce((a,s)=>a+(WEIGHTS[s]||0), 0);
-    if (Math.abs(wSum - 1.0) > 1e-6) {
-      alert("WEIGHTS must sum to 1.0. Currently: " + wSum);
-    }
-
-    let prevBasket = 50.0;
-    const history = []; // {t, fgi, raw}
+    const liveStates = {};
+    for (const s of SYMBOLS) liveStates[s] = new LiveSymbolState(s);
 
     // ----------------------------
-    // WebSocket (single combined stream)
-    // ----------------------------
-    let ws = null;
-    let wsBackoffMs = 500;
-
-    function setConn(status) {
-      const el = document.getElementById("conn");
-      el.textContent = status;
-      el.style.background = (status === "connected") ? "#eef9ee" : "#fff3f3";
-      el.style.borderColor = (status === "connected") ? "#b8e0b8" : "#f0b5b5";
-    }
-
-    function connectWS() {
-      const streams = [];
-      for (const sym of SYMBOLS) {
-        const s = sym.toLowerCase();
-        streams.push(`${s}@aggTrade`);
-        streams.push(`${s}@depth10@100ms`);
-      }
-      const url = `wss://stream.binance.com:9443/stream?streams=${streams.join("/")}`;
-
-      ws = new WebSocket(url);
-
-      ws.onopen = () => {
-        setConn("connected");
-        wsBackoffMs = 500;
-      };
-
-      ws.onclose = () => {
-        setConn("disconnected");
-        setTimeout(connectWS, wsBackoffMs);
-        wsBackoffMs = Math.min(15000, wsBackoffMs * 1.5);
-      };
-
-      ws.onerror = () => {
-        try { ws.close(); } catch {}
-      };
-
-      ws.onmessage = (ev) => {
-        let msg;
-        try { msg = JSON.parse(ev.data); } catch { return; }
-        const stream = msg.stream || "";
-        const d = msg.data || {};
-
-        // aggTrade fields: E, p, q, m
-        if (stream.endsWith("@aggTrade")) {
-          const sym = stream.split("@")[0].toUpperCase();
-          if (!states[sym]) return;
-          states[sym].onAggTrade(Number(d.E), Number(d.p), Number(d.q), Boolean(d.m));
-          return;
-        }
-
-
-        // depth10 fields: E, b, a
-        if (stream.includes("@depth10")) {
-          // stream looks like "btcusdt@depth10@100ms"
-          const sym = stream.split("@")[0].toUpperCase();
-          if (!states[sym]) return;
-          states[sym].onDepth10(Number(d.E), d.b || [], d.a || []);
-          return;
-        }
-
-      };
-    }
-
-    // ----------------------------
-    // UI (chart + table)
+    // Chart
     // ----------------------------
     let chart = null;
-
     function initChart() {
       const ctx = document.getElementById("chart").getContext("2d");
       chart = new Chart(ctx, {
@@ -524,7 +511,7 @@ async function dbLoadLast24h(db, cutoffSec) {
         data: {
           labels: [],
           datasets: [{
-            label: "FGI",
+            label: "FGI (1/min)",
             data: [],
             borderWidth: 2,
             pointRadius: 0,
@@ -539,22 +526,142 @@ async function dbLoadLast24h(db, cutoffSec) {
       });
     }
 
-    function updateUI(snapshot) {
-      const fgiEl = document.getElementById("fgi");
-      fgiEl.textContent = fmt(snapshot.fgi, 2);
-      fgiEl.style.color = colorForFGI(snapshot.fgi);
+    // ----------------------------
+    // Backfill: compute 1/min basket FGI from REST klines (24h)
+    // ----------------------------
+    let backfillSeries = []; // [{t_sec,fgi_raw,fgi}]
+    let prevBasketLive = 50.0;
+    let lastChartMinute = null;
 
-      const dt = new Date(snapshot.t_sec * 1000);
-      document.getElementById("meta").textContent =
-        `raw=${fmt(snapshot.fgi_raw,2)} | ${dt.toLocaleString()} | alpha=${BASKET_ALPHA}`;
+    async function runBackfill() {
+      const el = document.getElementById("backfill");
+      el.textContent = "Backfill: starting 24h fetch…";
 
-      // table
+      // Fetch in parallel (8 REST calls total for 4 symbols)
+      const bySym = {};
+      for (const sym of SYMBOLS) {
+        el.textContent = `Backfill: fetching ${sym}…`;
+        const kl = await fetchLast24h1m(sym);
+        bySym[sym] = computeAssetFrom1m(klinesToSeries(kl));
+      }
+
+      // Align on common minutes (intersection)
+      // Use BTC timeline as reference then require all symbols to have that timestamp
+      const ref = bySym[SYMBOLS[0]].t;
+      const has = {};
+      for (const sym of SYMBOLS) {
+        has[sym] = new Set(bySym[sym].t);
+      }
+
+      const commonT = ref.filter(ts => SYMBOLS.every(sym => has[sym].has(ts)));
+      if (!commonT.length) {
+        el.textContent = "Backfill: no overlapping timestamps across symbols (check REST access).";
+        return;
+      }
+
+      // Build quick index lookup for each symbol: t -> idx
+      const idx = {};
+      for (const sym of SYMBOLS) {
+        idx[sym] = new Map();
+        bySym[sym].t.forEach((ts, i) => idx[sym].set(ts, i));
+      }
+
+      // Build basket series
+      const out = [];
+      for (const ts of commonT) {
+        let total = 0;
+        let used = 0;
+
+        for (const sym of SYMBOLS) {
+          const i = idx[sym].get(ts);
+          const a = bySym[sym].asset[i];
+          const w = Number(WEIGHTS[sym] || 0);
+          if (Number.isFinite(a) && w > 0) {
+            total += w * a;
+            used += w;
+          }
+        }
+
+        if (used <= 0) continue;
+
+        const fgiRaw = clamp(total / (used + EPS));
+        // For backfill, keep "raw" as the 1/min point; if you want smoothing, apply an EMA here.
+        out.push({ t_sec: ts, fgi_raw: fgiRaw, fgi: fgiRaw });
+      }
+
+      backfillSeries = out;
+
+      // Fill chart with backfill
+      chart.data.labels = [];
+      chart.data.datasets[0].data = [];
+      const maxPts = 24 * 60; // 1440
+      const slice = backfillSeries.slice(-maxPts);
+      for (const p of slice) {
+        chart.data.labels.push(new Date(p.t_sec * 1000).toLocaleTimeString());
+        chart.data.datasets[0].data.push(p.fgi);
+      }
+      chart.update("none");
+
+      // Seed live EMA from the latest backfill point (prevents jump)
+      if (backfillSeries.length) prevBasketLive = backfillSeries[backfillSeries.length - 1].fgi;
+
+      el.textContent = `Backfill: loaded ${slice.length} points (1/min for 24h).`;
+    }
+
+    // ----------------------------
+    // Live WebSocket
+    // ----------------------------
+    let ws = null;
+    let wsBackoffMs = 500;
+
+    function connectWS() {
+      const streams = [];
+      for (const sym of SYMBOLS) {
+        const s = sym.toLowerCase();
+        streams.push(`${s}@aggTrade`);
+        streams.push(`${s}@depth10@100ms`);
+      }
+      const url = `wss://stream.binance.com:9443/stream?streams=${streams.join("/")}`;
+      ws = new WebSocket(url);
+
+      ws.onopen = () => { setConn("connected"); wsBackoffMs = 500; };
+      ws.onclose = () => {
+        setConn("disconnected");
+        setTimeout(connectWS, wsBackoffMs);
+        wsBackoffMs = Math.min(15000, wsBackoffMs * 1.5);
+      };
+      ws.onerror = () => { try { ws.close(); } catch {} };
+
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        const stream = msg.stream || "";
+        const d = msg.data || {};
+
+        // Robust symbol parsing from stream string (do not rely on d.s)
+        const sym = stream.split("@")[0].toUpperCase();
+        if (!liveStates[sym]) return;
+
+        if (stream.endsWith("@aggTrade")) {
+          liveStates[sym].onAggTrade(Number(d.E), Number(d.p), Number(d.q), Boolean(d.m));
+          return;
+        }
+        if (stream.includes("@depth10")) {
+          liveStates[sym].onDepth10(Number(d.E), d.b || [], d.a || []);
+          return;
+        }
+      };
+    }
+
+    // ----------------------------
+    // Live compute + UI
+    // ----------------------------
+    function updateTable(snapshotAssets) {
       const rows = document.getElementById("rows");
       rows.innerHTML = "";
-
-      const keys = Object.keys(snapshot.assets).sort();
+      const keys = Object.keys(snapshotAssets).sort();
       for (const k of keys) {
-        const a = snapshot.assets[k];
+        const a = snapshotAssets[k];
         const tr = document.createElement("tr");
         tr.innerHTML =
           `<td>${k}</td>` +
@@ -566,25 +673,9 @@ async function dbLoadLast24h(db, cutoffSec) {
           `<td>${fmt(a.aggr, 2)}</td>`;
         rows.appendChild(tr);
       }
-
-      // chart
-      if (chart) {
-        chart.data.labels.push(dt.toLocaleTimeString());
-        chart.data.datasets[0].data.push(snapshot.fgi);
-
-        const maxPts = 300;
-        if (chart.data.labels.length > maxPts) {
-          chart.data.labels.shift();
-          chart.data.datasets[0].data.shift();
-        }
-        chart.update("none");
-      }
     }
 
-    // ----------------------------
-    // Compute loop
-    // ----------------------------
-    function computeOnce() {
+    function computeLiveOnce() {
       const nowSec = Math.floor(Date.now() / 1000);
 
       const assets = {};
@@ -592,9 +683,8 @@ async function dbLoadLast24h(db, cutoffSec) {
       let used = 0;
 
       for (const sym of SYMBOLS) {
-        const sc = states[sym].compute(nowSec);
+        const sc = liveStates[sym].compute(nowSec);
         if (!sc) continue;
-
         assets[sym] = sc;
         const w = Number(WEIGHTS[sym] || 0);
         total += w * sc.asset;
@@ -604,98 +694,71 @@ async function dbLoadLast24h(db, cutoffSec) {
       if (used <= 0) return null;
 
       const fgiRaw = clamp(total / (used + EPS));
-      const fgi = clamp(BASKET_ALPHA * fgiRaw + (1 - BASKET_ALPHA) * prevBasket);
-      prevBasket = fgi;
+      const fgi = clamp(BASKET_ALPHA_LIVE * fgiRaw + (1 - BASKET_ALPHA_LIVE) * prevBasketLive);
+      prevBasketLive = fgi;
 
-      const snapshot = { t_sec: nowSec, fgi_raw: fgiRaw, fgi, assets };
+      return { t_sec: nowSec, fgi_raw: fgiRaw, fgi, assets };
+    }
 
-      history.push({t_sec: nowSec, fgi, fgi_raw: fgiRaw});
-      // Keep only last 24 hours in memory
-const cutoff = nowSec - HISTORY_KEEP_S;
-while (history.length && history[0].t_sec < cutoff) history.shift();
+    function updateHeader(snap) {
+      const fgiEl = document.getElementById("fgi");
+      fgiEl.textContent = fmt(snap.fgi, 2);
+      fgiEl.style.color = colorForFGI(snap.fgi);
 
+      const dt = new Date(snap.t_sec * 1000);
+      document.getElementById("meta").textContent =
+        `live raw=${fmt(snap.fgi_raw,2)} | ${dt.toLocaleString()} | alpha=${BASKET_ALPHA_LIVE}`;
+    }
 
-      return snapshot;
+    function maybeAppendChartPoint(snap) {
+      // Append at minute boundaries only
+      const minute = Math.floor(snap.t_sec / CHART_POINT_SECONDS);
+      if (lastChartMinute === null) lastChartMinute = minute;
+
+      if (minute !== lastChartMinute) {
+        lastChartMinute = minute;
+
+        // push one point
+        chart.data.labels.push(new Date(snap.t_sec * 1000).toLocaleTimeString());
+        chart.data.datasets[0].data.push(snap.fgi);
+
+        // keep last 24h in chart (1440 points)
+        const maxPts = 24 * 60;
+        while (chart.data.labels.length > maxPts) {
+          chart.data.labels.shift();
+          chart.data.datasets[0].data.shift();
+        }
+        chart.update("none");
+      }
     }
 
     // ----------------------------
     // Boot
     // ----------------------------
+    (async () => {
+      initChart();
+      setConn("disconnected");
 
-
-
-
-let db = null;
-
-async function initPersistentHistory() {
-  db = await openDB();
-  const nowSec = Math.floor(Date.now() / 1000);
-  const cutoff = nowSec - HISTORY_KEEP_S;
-
-  const points = await dbLoadLast24h(db, cutoff);
-
-  // Replace your in-memory history with the persisted points
-  history.length = 0;
-  for (const p of points) history.push(p);
-
-  // Seed prevBasket from the most recent stored fgi so EMA continues smoothly
-  if (history.length) {
-    prevBasket = history[history.length - 1].fgi;
-  }
-
-  // Pre-fill chart with stored history
-  for (const p of history.slice(-300)) {
-    const dt = new Date(p.t_sec * 1000);
-    chart.data.labels.push(dt.toLocaleTimeString());
-    chart.data.datasets[0].data.push(p.fgi);
-  }
-  chart.update("none");
-}
-
-
-    
-    initChart();
-    setConn("disconnected");
-    connectWS();
-
-(async () => {
-  initChart();
-  setConn("disconnected");
-  connectWS();
-  await initPersistentHistory();
-
-  setInterval(async () => {
-    const snap = computeOnce();
-    if (snap) {
-      updateUI(snap);
-
-      // Persist only the minimal point
-      const point = { t_sec: snap.t_sec, fgi: snap.fgi, fgi_raw: snap.fgi_raw };
-
-      // Save + prune in background (still on main thread, but fast)
-      if (db) {
-        await dbPutPoint(db, point);
-
-        // prune once per minute (avoid doing it every 5 seconds)
-        if (!window._lastPrune || (Date.now() - window._lastPrune) > 60_000) {
-          window._lastPrune = Date.now();
-          const cutoff = Math.floor(Date.now() / 1000) - HISTORY_KEEP_S;
-          await dbDeleteOlderThan(db, cutoff);
-        }
+      // backfill first (REST)
+      try {
+        await runBackfill();
+      } catch (e) {
+        document.getElementById("backfill").textContent =
+          `Backfill failed: ${String(e.message || e)}`;
       }
-    }
-  }, UPDATE_EVERY_MS);
-})();
 
+      // then start live WS + compute loop
+      connectWS();
 
+      setInterval(() => {
+        const snap = computeLiveOnce();
+        if (!snap) return;
 
-
-    
-    // First paint once data is available
-    setInterval(() => {
-      const snap = computeOnce();
-      if (snap) updateUI(snap);
-    }, UPDATE_EVERY_MS);
+        updateHeader(snap);
+        updateTable(snap.assets);
+        maybeAppendChartPoint(snap);
+      }, LIVE_UPDATE_EVERY_MS);
+    })();
   </script>
 </body>
 </html>
