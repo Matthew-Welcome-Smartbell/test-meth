@@ -612,7 +612,7 @@
         if (used <= 0) continue;
 
         //const fgiRaw = clamp(total / (used + EPS));
-
+        //        //out.push({ t_sec: ts, fgi_raw: fgiRaw, fgi: fgiRaw });
 
         // For backfill, keep "raw" as the 1/min point; if you want smoothing, apply an EMA here.
                 let prev = 50.0; // or seed with first fgiRaw when available
@@ -626,9 +626,6 @@
           out.push({ t_sec: ts, fgi_raw: fgiRaw, fgi });
         }
 
-
-
-        out.push({ t_sec: ts, fgi_raw: fgiRaw, fgi: fgiRaw });
       }
 
       backfillSeries = out;
