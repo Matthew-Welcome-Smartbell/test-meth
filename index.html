@@ -28,6 +28,7 @@
         <div class="muted">Basket FGI (live updates every 5s; chart is 1/min)</div>
         <div id="fgi" class="big">--</div>
         <div id="meta" class="muted small"></div>
+        <div id="stats" class="muted small"></div>
         <div id="backfill" class="muted small"></div>
         <div class="small warn" style="margin-top:6px;">
           Note: historical order book isn’t available from Binance; OB uses a candle-based proxy for the 24h backfill.
@@ -159,6 +160,32 @@
       el.style.background = (status === "connected") ? "#eef9ee" : "#fff3f3";
       el.style.borderColor = (status === "connected") ? "#b8e0b8" : "#f0b5b5";
     }
+
+        function update24hStatsFromChart() {
+      if (!chart) return;
+      const data = chart.data.datasets[0].data || [];
+      if (!data.length) {
+        document.getElementById("stats").textContent = "";
+        return;
+      }
+
+      let hi = -Infinity, lo = Infinity, sum = 0, n = 0;
+      for (const v of data) {
+        const x = Number(v);
+        if (!Number.isFinite(x)) continue;
+        if (x > hi) hi = x;
+        if (x < lo) lo = x;
+        sum += x;
+        n++;
+      }
+
+      if (!n) return;
+      const avg = sum / n;
+
+      document.getElementById("stats").textContent =
+        `24h FGI: high=${hi.toFixed(2)}  low=${lo.toFixed(2)}  avg=${avg.toFixed(2)}  (points=${n})`;
+    }
+
 
     // ----------------------------
     // Binance REST backfill (1m klines)
@@ -601,6 +628,8 @@
         chart.data.datasets[0].data.push(p.fgi);
       }
       chart.update("none");
+      update24hStatsFromChart();
+
 
       // Seed live EMA from the latest backfill point (prevents jump)
       if (backfillSeries.length) prevBasketLive = backfillSeries[backfillSeries.length - 1].fgi;
@@ -729,6 +758,8 @@
           chart.data.datasets[0].data.shift();
         }
         chart.update("none");
+        update24hStatsFromChart();
+
       }
     }
 
