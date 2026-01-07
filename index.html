@@ -593,40 +593,39 @@
         bySym[sym].t.forEach((ts, i) => idx[sym].set(ts, i));
       }
 
-      // Build basket series
-      const out = [];
-      for (const ts of commonT) {
-        let total = 0;
-        let used = 0;
+        // Build basket series
+        const out = [];
+        let prev = 50.0;                 // EMA seed
+        const ALPHA_BACKFILL = 0.10;      // set to 0.10 if you want backfill smoothed the same way
 
-        for (const sym of SYMBOLS) {
-          const i = idx[sym].get(ts);
-          const a = bySym[sym].asset[i];
-          const w = Number(WEIGHTS[sym] || 0);
-          if (Number.isFinite(a) && w > 0) {
-            total += w * a;
-            used += w;
-          }
-        }
-
-        if (used <= 0) continue;
-
-        //const fgiRaw = clamp(total / (used + EPS));
-        //        //out.push({ t_sec: ts, fgi_raw: fgiRaw, fgi: fgiRaw });
-
-        // For backfill, keep "raw" as the 1/min point; if you want smoothing, apply an EMA here.
-                let prev = 50.0; // or seed with first fgiRaw when available
         for (const ts of commonT) {
-          
+          let total = 0;
+          let used = 0;
+
+          for (const sym of SYMBOLS) {
+            const i = idx[sym].get(ts);
+            const a = bySym[sym].asset[i];
+            const w = Number(WEIGHTS[sym] || 0);
+            if (Number.isFinite(a) && w > 0) {
+              total += w * a;
+              used += w;
+            }
+          }
+
+          if (used <= 0) continue;
+
           const fgiRaw = clamp(total / (used + EPS));
 
-          const fgi = clamp(0.20 * fgiRaw + 0.80 * prev);
+          // Option A: NO smoothing for backfill (recommended for transparency)
+          // const fgi = fgiRaw;
+
+          // Option B: EMA smoothing for backfill
+          const fgi = clamp(ALPHA_BACKFILL * fgiRaw + (1 - ALPHA_BACKFILL) * prev);
           prev = fgi;
 
           out.push({ t_sec: ts, fgi_raw: fgiRaw, fgi });
         }
 
-      }
 
       backfillSeries = out;
 
