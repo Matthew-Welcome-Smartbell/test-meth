@@ -596,7 +596,7 @@
         // Build basket series
         const out = [];
         let prev = 50.0;                 // EMA seed
-        const ALPHA_BACKFILL = 0.10;      // set to 0.10 if you want backfill smoothed the same way
+        const ALPHA_BACKFILL = 0.50;      // set to 0.10 if you want backfill smoothed the same way
 
         for (const ts of commonT) {
           let total = 0;
