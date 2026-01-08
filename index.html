@@ -49,7 +49,7 @@
     </div>
   </div>
 
-  <!-- NEW: Weights UI -->
+  <!-- Weights UI -->
   <div class="card">
     <div class="muted">Basket weights (auto-normalized to sum to 1)</div>
     <div class="row" style="margin-top:10px;">
@@ -221,7 +221,6 @@
     }
 
     function normalizeWeights(obj) {
-      // clamp invalids to 0
       const clean = {};
       let sum = 0;
       for (const sym of SYMBOLS) {
@@ -232,7 +231,7 @@
       }
       if (sum <= 0) return { ok: false, weights: null, msg: "Weights sum to 0. Enter at least one positive weight." };
       for (const sym of SYMBOLS) clean[sym] = clean[sym] / sum;
-      return { ok: true, weights: clean, msg: `Normalized (sum=1).` };
+      return { ok: true, weights: clean, msg: "Normalized (sum=1)." };
     }
 
     function readWeightsFromUI() {
@@ -254,6 +253,10 @@
     function setWeightStatus(msg, isError=false) {
       document.getElementById("wStatus").textContent = isError ? "" : msg;
       document.getElementById("wError").textContent = isError ? msg : "";
+    }
+
+    function weightsSummary() {
+      return SYMBOLS.map(s => `${s}=${(WEIGHTS[s]*100).toFixed(1)}%`).join(" ");
     }
 
     // ----------------------------
@@ -313,6 +316,7 @@
       return { t, open, high, low, close, vol, takerBuy };
     }
 
+    // Compute per-minute asset scores from 1m candle data (approx core logic)
     function computeAssetFrom1m(series) {
       const { t, open, high, low, close, vol, takerBuy } = series;
       const n = t.length;
@@ -336,6 +340,8 @@
       const aggr = new Array(n).fill(NaN);
       const asset = new Array(n).fill(NaN);
 
+      // Candle-based OB proxy imbalance in [-1,1]:
+      // imb_proxy = (close - open) / (high - low)
       const imbProxy = new Array(n).fill(0);
       for (let i=0; i<n; i++) {
         const rng = (high[i] - low[i]);
@@ -344,6 +350,7 @@
       }
 
       for (let i=0; i<n; i++) {
+        // Momentum short/long
         if (i - ms >= 0 && close[i-ms] > 0 && close[i] > 0) {
           const rS = Math.log(close[i] / (close[i-ms] + EPS));
           const momS = tanhScoreSigned(rS, P.k_m_short);
@@ -358,6 +365,7 @@
           mom[i] = momVal;
         }
 
+        // Volatility short/long
         const retsS = [];
         for (let j=Math.max(1, i - vs + 1); j<=i; j++) if (Number.isFinite(ret[j])) retsS.push(ret[j]);
         const volS = std(retsS);
@@ -371,10 +379,12 @@
         const aV = clamp(P.vol_blend_short, 0, 1);
         volScore[i] = aV * volSScore + (1 - aV) * volLScore;
 
+        // OB proxy mean
         let sumImb = 0, cntImb = 0;
         for (let j=Math.max(0, i - iw + 1); j<=i; j++) { sumImb += imbProxy[j]; cntImb++; }
         ob[i] = clamp(50 + 50 * (cntImb ? (sumImb / cntImb) : 0));
 
+        // Aggression proxy: taker buy ratio (takerBuyBase / volume)
         let bSum = 0, vSum = 0;
         for (let j=Math.max(0, i - aw + 1); j<=i; j++) {
           bSum += takerBuy[j];
@@ -399,7 +409,7 @@
     // Live WS state
     // ----------------------------
     class Rolling1s {
-      constructor() { this.arr = []; }
+      constructor() { this.arr = []; } // {t, v}
       push(t, v) { this.arr.push({t, v}); }
       prune(cutoff) { while (this.arr.length && this.arr[0].t < cutoff) this.arr.shift(); }
       valuesSince(cutoff) { return this.arr.filter(x => x.t >= cutoff).map(x => x.v); }
@@ -409,11 +419,11 @@
     class LiveSymbolState {
       constructor(symbol) {
         this.symbol = symbol;
-        this.prices = new Rolling1s();
-        this.rets = new Rolling1s();
+        this.prices = new Rolling1s(); // per-second last price
+        this.rets = new Rolling1s();   // per-second log returns
         this.buy1s = new Rolling1s();
         this.sell1s = new Rolling1s();
-        this.imb = new Rolling1s();
+        this.imb = new Rolling1s();    // signed imbalance [-1,1] from depth10
 
         this.curSec = null;
         this.curPrice = null;
@@ -467,8 +477,10 @@
           return;
         }
 
+        // flush previous second
         this.flushSecond(this.curSec, Number(this.curPrice ?? price), this.curBuy, this.curSell);
 
+        // fill small gaps (cap)
         const gap = sec - this.curSec;
         const fillMax = 30;
         if (gap > 1) {
@@ -477,6 +489,7 @@
           for (let s=this.curSec + 1; s<=fillTo; s++) this.flushSecond(s, lastP, 0, 0);
         }
 
+        // reset current
         this.curSec = sec;
         this.curPrice = price;
         this.curBuy = 0;
@@ -498,6 +511,7 @@
       }
 
       priceAtOrAfter(targetSec) {
+        // first price with t >= target
         for (const x of this.prices.arr) {
           if (x.t >= targetSec) return x.v;
         }
@@ -510,6 +524,7 @@
         const pNow = this.prices.latest();
         if (!(pNow > 0)) return null;
 
+        // Momentum short/long
         const pS = this.priceAtOrAfter(nowSec - P.mom_short_s);
         if (!(pS > 0)) return null;
 
@@ -525,6 +540,7 @@
           mom = a * momS + (1 - a) * momL;
         }
 
+        // Vol
         const retsS = this.rets.valuesSince(nowSec - P.vol_short_s);
         const volS = std(retsS);
         const volSScore = tanhScoreNegative(volS, P.k_v_short);
@@ -536,6 +552,7 @@
         const aV = clamp(P.vol_blend_short, 0, 1);
         const vol = aV * volSScore + (1 - aV) * volLScore;
 
+        // OB (real, from depth10 imbalance)
         const imbs = this.imb.valuesSince(nowSec - P.imb_window_s);
         let ob = 50;
         if (imbs.length) {
@@ -543,6 +560,7 @@
           ob = clamp(50 + 50 * mean);
         }
 
+        // Aggression (real, from taker buy vs sell 1s)
         const buys = this.buy1s.valuesSince(nowSec - P.aggr_window_s);
         const sells = this.sell1s.valuesSince(nowSec - P.aggr_window_s);
         const bSum = buys.reduce((a,b)=>a+b,0);
@@ -590,13 +608,14 @@
     }
 
     // ----------------------------
-    // Backfill (24h) – recomputable when weights change
+    // Backfill cache + recompute
     // ----------------------------
-    let backfillSeries = [];
+    let backfillSeries = [];    // [{t_sec,fgi_raw,fgi}]
+    let backfillCache = null;   // { commonT: number[], idx: Record<sym, Map<t, i>>, bySym: Record<sym, series> }
     let prevBasketLive = 50.0;
     let lastChartMinute = null;
 
-    async function runBackfill() {
+    async function loadBackfillCacheOnce() {
       const el = document.getElementById("backfill");
       el.textContent = "Backfill: starting 24h fetch…";
 
@@ -607,6 +626,7 @@
         bySym[sym] = computeAssetFrom1m(klinesToSeries(kl));
       }
 
+      // Align on common minutes (intersection)
       const ref = bySym[SYMBOLS[0]].t;
       const has = {};
       for (const sym of SYMBOLS) has[sym] = new Set(bySym[sym].t);
@@ -614,14 +634,31 @@
       const commonT = ref.filter(ts => SYMBOLS.every(sym => has[sym].has(ts)));
       if (!commonT.length) {
         el.textContent = "Backfill: no overlapping timestamps across symbols (check REST access).";
+        backfillCache = null;
         return;
       }
 
+      // Build index lookups t -> idx for each symbol
       const idx = {};
       for (const sym of SYMBOLS) {
         idx[sym] = new Map();
         bySym[sym].t.forEach((ts, i) => idx[sym].set(ts, i));
       }
+
+      backfillCache = { commonT, idx, bySym };
+      el.textContent = `Backfill: cache ready (${commonT.length} minutes). Rendering basket…`;
+
+      recomputeBackfillFromCache();
+    }
+
+    function recomputeBackfillFromCache() {
+      const el = document.getElementById("backfill");
+      if (!backfillCache) {
+        el.textContent = "Backfill: cache not ready.";
+        return;
+      }
+
+      const { commonT, idx, bySym } = backfillCache;
 
       const out = [];
       let prev = 50.0;
@@ -634,6 +671,7 @@
           const i = idx[sym].get(ts);
           const a = bySym[sym].asset[i];
           const w = Number(WEIGHTS[sym] || 0);
+
           if (Number.isFinite(a) && w > 0) {
             total += w * a;
             used += w;
@@ -651,6 +689,7 @@
 
       backfillSeries = out;
 
+      // Update chart with last 24h (max 1440 points)
       chart.data.labels = [];
       chart.data.datasets[0].data = [];
       const maxPts = 24 * 60;
@@ -660,16 +699,14 @@
         chart.data.labels.push(new Date(p.t_sec * 1000).toLocaleTimeString());
         chart.data.datasets[0].data.push(p.fgi);
       }
+
       chart.update("none");
       update24hStatsFromChart();
 
+      // Seed live EMA from latest backfill point (prevents jump on apply)
       if (backfillSeries.length) prevBasketLive = backfillSeries[backfillSeries.length - 1].fgi;
 
-      el.textContent = `Backfill: loaded ${slice.length} points (1/min for 24h). Weights: ${weightsSummary()}`;
-    }
-
-    function weightsSummary() {
-      return SYMBOLS.map(s => `${s}=${(WEIGHTS[s]*100).toFixed(1)}%`).join(" ");
+      el.textContent = `Backfill: rendered ${slice.length} pts using current weights.`;
     }
 
     // ----------------------------
@@ -800,7 +837,10 @@
     // Weights UI wiring
     // ----------------------------
     function initWeightsUI() {
-      // Seed UI from WEIGHTS
+      // Normalize WEIGHTS at startup so the UI and the computations match.
+      const r0 = normalizeWeights(WEIGHTS);
+      if (r0.ok) WEIGHTS = r0.weights;
+
       writeWeightsToUI(WEIGHTS);
       setWeightStatus(`Current: ${weightsSummary()}`);
 
@@ -812,29 +852,20 @@
         setWeightStatus(`Normalized preview: ${SYMBOLS.map(s => `${s}=${(r.weights[s]*100).toFixed(1)}%`).join(" ")}`);
       };
 
-      document.getElementById("btnApply").onclick = async () => {
+      document.getElementById("btnApply").onclick = () => {
         setWeightStatus("Applying…");
         const raw = readWeightsFromUI();
         const r = normalizeWeights(raw);
         if (!r.ok) return setWeightStatus(r.msg, true);
 
-        // Apply new weights
         WEIGHTS = r.weights;
         writeWeightsToUI(WEIGHTS);
+
+        // recompute historic series and refresh chart immediately
+        recomputeBackfillFromCache();
+        lastChartMinute = null;
+
         setWeightStatus(`Applied: ${weightsSummary()}`);
-
-        // Recompute backfill chart with new weights
-        try {
-          await runBackfill();
-          // Reset lastChartMinute so minute append logic stays sane after chart refresh
-          lastChartMinute = null;
-
-          // Also seed live EMA from latest chart point (prevents jumps)
-          const data = chart?.data?.datasets?.[0]?.data || [];
-          if (data.length) prevBasketLive = Number(data[data.length - 1]) || prevBasketLive;
-        } catch (e) {
-          setWeightStatus(`Apply failed: ${String(e.message || e)}`, true);
-        }
       };
     }
 
@@ -847,7 +878,7 @@
       setConn("disconnected");
 
       try {
-        await runBackfill();
+        await loadBackfillCacheOnce();
       } catch (e) {
         document.getElementById("backfill").textContent =
           `Backfill failed: ${String(e.message || e)}`;
