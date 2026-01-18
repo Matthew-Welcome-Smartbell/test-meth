@@ -24,7 +24,7 @@
     .tileMeta { font-size: 12px; color: #666; margin-top: 4px; }
 
     /* warnings */
-    .warnBox { margin-top: 10px; padding: 10px; border-radius: 10px; border: 1px solid; }
+    .warnBox { margin-top: 10px; padding: 10px; border-radius: 10px; border: 1px solid; white-space: pre-line; }
     .warnRed { background: #fff1f1; border-color: #f0b5b5; color: #7a0000; font-weight: 700; }
     .warnYellow { background: #fff9e6; border-color: #f0d48a; color: #6a5200; font-weight: 700; }
 
@@ -139,7 +139,8 @@
 
     const ALT_URL = "https://api.alternative.me/fng/?limit=500&format=json";
 
-    const PRICE_SYMBOL = "BTCUSDT";
+    // Prices + moving averages are computed for BOTH BTC and ETH (per your request).
+    const PRICE_SYMBOLS = ["BTCUSDT", "ETHUSDT"];
 
     const LIVE_UPDATE_EVERY_MS = 5000;
     const CHART_POINT_SECONDS = 60;
@@ -170,6 +171,10 @@
       w_ob: 0.20,
       w_aggr: 0.20,
     };
+
+    // RED warning thresholds (both now use 5%)
+    const RED_PCT_30D = 0.05;
+    const RED_PCT_60D = 0.05;
 
     const EPS = 1e-12;
 
@@ -325,33 +330,27 @@
         if (next <= cursor) break;
         cursor = next;
 
-        // If batch < 1000, we're done.
         if (batch.length < 1000) break;
       }
 
-      // de-dup and sort
       const map = new Map();
       for (const k of out) map.set(k[0], k);
       return Array.from(map.values()).sort((a,b)=>a[0]-b[0]);
     }
 
     async function fetchDailyCloses(symbol, days) {
-      // days <= 1000 ok
       const now = Date.now();
       const start = now - days * 24 * 3600 * 1000;
       const kl = await fetchKlines(symbol, "1d", start, now, 1000);
-      // close at index 4
       return kl.map(k => ({ tSec: Math.floor(k[0]/1000), close: Number(k[4]) }));
     }
 
-    // Convert klines to series
     function klinesToSeries(klines) {
       const t = [], open=[], high=[], low=[], close=[], vol=[], takerBuy=[];
       for (const k of klines) {
         t.push(Math.floor(Number(k[0]) / 1000));
         open.push(Number(k[1])); high.push(Number(k[2])); low.push(Number(k[3]));
         close.push(Number(k[4])); vol.push(Number(k[5]));
-        // takerBuyBaseAssetVolume index 9
         takerBuy.push(Number(k[9]));
       }
       return { t, open, high, low, close, vol, takerBuy };
@@ -381,7 +380,6 @@
       const aggr = new Array(n).fill(NaN);
       const asset = new Array(n).fill(NaN);
 
-      // Candle-based OB proxy imbalance in [-1,1]
       const imbProxy = new Array(n).fill(0);
       for (let i=0; i<n; i++) {
         const rng = (high[i] - low[i]);
@@ -389,7 +387,6 @@
       }
 
       for (let i=0; i<n; i++) {
-        // Momentum
         if (i - ms >= 0 && close[i-ms] > 0 && close[i] > 0) {
           const rS = Math.log(close[i] / (close[i-ms] + EPS));
           const momS = tanhScoreSigned(rS, P.k_m_short);
@@ -404,7 +401,6 @@
           mom[i] = momVal;
         }
 
-        // Volatility
         const retsS = [];
         for (let j=Math.max(1, i - vs + 1); j<=i; j++) if (Number.isFinite(ret[j])) retsS.push(ret[j]);
         const volS = std(retsS);
@@ -418,12 +414,10 @@
         const aV = clamp(P.vol_blend_short, 0, 1);
         volScore[i] = aV * volSScore + (1 - aV) * volLScore;
 
-        // OB proxy mean
         let sumImb = 0, cntImb = 0;
         for (let j=Math.max(0, i - iw + 1); j<=i; j++) { sumImb += imbProxy[j]; cntImb++; }
         ob[i] = clamp(50 + 50 * (cntImb ? (sumImb / cntImb) : 0));
 
-        // Aggression proxy
         let bSum = 0, vSum = 0;
         for (let j=Math.max(0, i - aw + 1); j<=i; j++) { bSum += takerBuy[j]; vSum += vol[j]; }
         aggr[i] = (vSum > 0) ? clamp(100 * (bSum / (vSum + EPS))) : 50;
@@ -447,12 +441,10 @@
       }
       const j = await res.json();
       const arr = j?.data || [];
-      // Each item: { value, value_classification, timestamp, time_until_update }
-      // timestamp is seconds (string)
       const parsed = arr
         .map(x => ({ tSec: Number(x.timestamp), value: Number(x.value), cls: String(x.value_classification||"") }))
         .filter(x => Number.isFinite(x.tSec) && Number.isFinite(x.value))
-        .sort((a,b)=>a.tSec-b.tSec); // oldest->newest
+        .sort((a,b)=>a.tSec-b.tSec);
       return parsed;
     }
 
@@ -460,7 +452,7 @@
     // LIVE WS STATE (MyFGI live)
     // ============================
     class Rolling1s {
-      constructor() { this.arr = []; } // {t, v}
+      constructor() { this.arr = []; }
       push(t, v) { this.arr.push({t, v}); }
       prune(cutoff) { while (this.arr.length && this.arr[0].t < cutoff) this.arr.shift(); }
       valuesSince(cutoff) { return this.arr.filter(x => x.t >= cutoff).map(x => x.v); }
@@ -470,11 +462,11 @@
     class LiveSymbolState {
       constructor(symbol) {
         this.symbol = symbol;
-        this.prices = new Rolling1s(); // per-second last price
-        this.rets = new Rolling1s();   // per-second log returns
+        this.prices = new Rolling1s();
+        this.rets = new Rolling1s();
         this.buy1s = new Rolling1s();
         this.sell1s = new Rolling1s();
-        this.imb = new Rolling1s();    // signed imbalance [-1,1] from depth10
+        this.imb = new Rolling1s();
 
         this.curSec = null;
         this.curPrice = null;
@@ -629,8 +621,8 @@
     // ============================
     // MYFGI BACKFILL CACHE (72h)
     // ============================
-    let backfillCache = null; // { commonT: number[], idx: Record<sym, Map<t, i>>, bySym: Record<sym, {t,asset}> }
-    let myFgiSeries = [];     // [{t_sec, fgi_raw, fgi}]
+    let backfillCache = null;
+    let myFgiSeries = [];
     let prevBasketLive = 50.0;
     let lastChartMinute = null;
 
@@ -645,7 +637,6 @@
         bySym[sym] = computeAssetFrom1m(klinesToSeries(kl));
       }
 
-      // Intersect timestamps
       const ref = bySym[SYMBOLS[0]].t;
       const has = {};
       for (const sym of SYMBOLS) has[sym] = new Set(bySym[sym].t);
@@ -696,7 +687,6 @@
 
       myFgiSeries = out;
 
-      // Chart last 24h (1440 points) from series
       const maxPts = 24*60;
       const slice = myFgiSeries.slice(-maxPts);
 
@@ -708,7 +698,6 @@
       }
       chart.update("none");
 
-      // Seed live EMA from latest backfill point
       if (myFgiSeries.length) prevBasketLive = myFgiSeries[myFgiSeries.length-1].fgi;
 
       const stats = update24hStatsFromChart(chart);
@@ -717,8 +706,7 @@
     }
 
     function computeMyFgiDailyAveragesLast3Days() {
-      // Use myFgiSeries (72h). Group by UTC date and average.
-      const map = new Map(); // dayKey -> {sum, n}
+      const map = new Map();
       for (const p of myFgiSeries) {
         const k = dayKeyUTC(p.t_sec);
         if (!map.has(k)) map.set(k, { sum: 0, n: 0 });
@@ -730,39 +718,56 @@
         .filter(x => Number.isFinite(x.avg))
         .sort((a,b)=> a.day.localeCompare(b.day));
 
-      return days.slice(-3); // last 3 days present
+      return days.slice(-3);
     }
 
     // ============================
-    // PRICE AVERAGES (BTC)
+    // PRICE AVERAGES (BTC + ETH)
     // ============================
-    let btcDailyCloses = null; // [{tSec, close}]
-    let priceNow = null;
+    const dailyClosesBySym = {}; // sym -> [{tSec, close}]
+    const livePriceBySym = {};   // sym -> last trade price from WS
 
-    function avgLastNCloses(n) {
-      if (!btcDailyCloses || btcDailyCloses.length < n) return null;
-      const arr = btcDailyCloses.slice(-n).map(x => x.close).filter(v => Number.isFinite(v));
+    function avgLastNCloses(sym, n) {
+      const arr0 = dailyClosesBySym[sym];
+      if (!arr0 || arr0.length < n) return null;
+      const arr = arr0.slice(-n).map(x => x.close).filter(v => Number.isFinite(v));
       if (arr.length < n) return null;
       const sum = arr.reduce((a,b)=>a+b,0);
       return sum / arr.length;
     }
 
-    async function loadBtcDailyCloses() {
-      // Need 90 days, plus a bit of buffer
-      btcDailyCloses = await fetchDailyCloses(PRICE_SYMBOL, 120);
+    async function loadDailyClosesAll() {
+      // pull enough for 90d + buffer
+      for (const sym of PRICE_SYMBOLS) {
+        dailyClosesBySym[sym] = await fetchDailyCloses(sym, 120);
+      }
+    }
+
+    function currentPrice(sym) {
+      if (Number.isFinite(livePriceBySym[sym])) return livePriceBySym[sym];
+      const dc = dailyClosesBySym[sym];
+      if (dc && dc.length) return dc[dc.length-1].close;
+      return null;
     }
 
     function updatePriceStatsUI() {
-      const a7 = avgLastNCloses(7);
-      const a30 = avgLastNCloses(30);
-      const a60 = avgLastNCloses(60);
-      const a90 = avgLastNCloses(90);
+      const lines = [];
+      const pack = {}; // sym -> { p, a7, a30, a60, a90 }
+      for (const sym of PRICE_SYMBOLS) {
+        const p = currentPrice(sym);
+        const a7  = avgLastNCloses(sym, 7);
+        const a30 = avgLastNCloses(sym, 30);
+        const a60 = avgLastNCloses(sym, 60);
+        const a90 = avgLastNCloses(sym, 90);
+        pack[sym] = { p, a7, a30, a60, a90 };
 
-      const p = (priceNow != null) ? priceNow : (btcDailyCloses?.length ? btcDailyCloses[btcDailyCloses.length-1].close : null);
+        lines.push(
+          `${sym.replace("USDT","")}: price=${fmt(p,2)} | 7d avg=${fmt(a7,2)} | 30d avg=${fmt(a30,2)} | 60d avg=${fmt(a60,2)} | 90d avg=${fmt(a90,2)}`
+        );
+      }
 
-      document.getElementById("priceStats").textContent =
-        `BTC price=${fmt(p, 2)} | 7d avg=${fmt(a7,2)} | 30d avg=${fmt(a30,2)} | 60d avg=${fmt(a60,2)} | 90d avg=${fmt(a90,2)}`;
-      return { p, a30, a60 };
+      document.getElementById("priceStats").textContent = lines.join("   ||   ");
+      return pack;
     }
 
     // ============================
@@ -778,7 +783,6 @@
       const sumAvail = (hasMy ? wMy : 0) + (hasAlt ? wAlt : 0);
       if (sumAvail <= 0) return { avg: NaN, meta: "avg unavailable (missing sources)" };
 
-      // Renormalize on available sources (important for Option 1 correctness)
       const myN = hasMy ? (wMy / sumAvail) : 0;
       const altN = hasAlt ? (wAlt / sumAvail) : 0;
 
@@ -797,26 +801,35 @@
       el.textContent = msg;
     }
 
-    function evaluateWarnings(avgFgiNow, pricePack, avgFgiDailyLast3) {
-      const p = pricePack.p;
-      const a30 = pricePack.a30;
-      const a60 = pricePack.a60;
+    function evaluateWarnings(avgFgiNow, pricePackBySym, avgFgiDailyLast3) {
+      // RED conditions (duplicated for BTC and ETH) and now BOTH use 5%.
+      const redMsgs = [];
 
-      // RED conditions
-      const red1 = (Number.isFinite(p) && Number.isFinite(a60) && p > a60 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
-      const red2 = (Number.isFinite(p) && Number.isFinite(a30) && p > a30 * 1.10 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
+      for (const sym of PRICE_SYMBOLS) {
+        const pp = pricePackBySym?.[sym] || {};
+        const p   = pp.p;
+        const a30 = pp.a30;
+        const a60 = pp.a60;
 
-      const redMsg = [];
-      if (red1) redMsg.push(`price > 60d avg * 1.05 AND avg FGI < 40`);
-      if (red2) redMsg.push(`price > 30d avg * 1.10 AND avg FGI < 40`);
-      setWarn("warnRed", redMsg.length > 0, redMsg.length ? `RED WARNING: ${redMsg.join(" | ")}` : "");
+        const tag = sym.replace("USDT","");
+
+        const red60 = (Number.isFinite(p) && Number.isFinite(a60) && Number.isFinite(avgFgiNow) &&
+                      p > a60 * (1 + RED_PCT_60D) && avgFgiNow < 40);
+
+        const red30 = (Number.isFinite(p) && Number.isFinite(a30) && Number.isFinite(avgFgiNow) &&
+                      p > a30 * (1 + RED_PCT_30D) && avgFgiNow < 40);
+
+        if (red60) redMsgs.push(`${tag}: price > 60d avg * ${(1+RED_PCT_60D).toFixed(2)} AND avg FGI < 40`);
+        if (red30) redMsgs.push(`${tag}: price > 30d avg * ${(1+RED_PCT_30D).toFixed(2)} AND avg FGI < 40`);
+      }
+
+      setWarn("warnRed", redMsgs.length > 0, redMsgs.length ? `RED WARNING:\n- ${redMsgs.join("\n- ")}` : "");
 
       // YELLOW #1
       const y1 = (Number.isFinite(avgFgiNow) && avgFgiNow > 50);
       setWarn("warnY1", y1, y1 ? "WARNING: average FGI > 50, use reduced leverage" : "");
 
       // YELLOW #2: avg FGI < 37 for 3+ days
-      // We require 3 daily points and all < 37.
       let y2 = false;
       if (avgFgiDailyLast3 && avgFgiDailyLast3.length >= 3) {
         y2 = avgFgiDailyLast3.slice(-3).every(x => Number.isFinite(x.avg) && x.avg < 37);
@@ -859,7 +872,7 @@
 
         if (stream.endsWith("@aggTrade")) {
           liveStates[sym].onAggTrade(Number(d.E), Number(d.p), Number(d.q), Boolean(d.m));
-          if (sym === PRICE_SYMBOL) priceNow = Number(d.p);
+          if (PRICE_SYMBOLS.includes(sym)) livePriceBySym[sym] = Number(d.p);
           return;
         }
         if (stream.includes("@depth10")) {
@@ -937,7 +950,7 @@
     // ============================
     // EXTERNAL FGI STATE
     // ============================
-    let altHistory = null; // [{tSec,value,cls}] oldest->newest
+    let altHistory = null;
     let altNow = NaN;
     let altNowMeta = "";
 
@@ -952,7 +965,6 @@
 
     function computeAltDailyLast3() {
       if (!altHistory || altHistory.length < 3) return [];
-      // altHistory is daily-ish; take last 3 entries.
       return altHistory.slice(-3).map(x => ({ day: dayKeyUTC(x.tSec), avg: clamp(x.value) }));
     }
 
@@ -983,7 +995,6 @@
         WEIGHTS = r.weights;
         writeWeightsToUI(WEIGHTS);
 
-        // Recompute MyFGI backfill + reseed live EMA to avoid a jump
         recomputeMyFgiFromCache();
         lastChartMinute = null;
 
@@ -999,10 +1010,11 @@
       initWeightsUI();
       setConn("disconnected");
 
+      // Daily closes for BOTH BTC and ETH
       try {
-        await loadBtcDailyCloses();
+        await loadDailyClosesAll();
       } catch (e) {
-        document.getElementById("priceStats").textContent = `BTC daily load failed: ${String(e.message || e)}`;
+        document.getElementById("priceStats").textContent = `Daily close load failed: ${String(e.message || e)}`;
       }
 
       try {
@@ -1014,44 +1026,36 @@
       try {
         await refreshAlt();
       } catch (e) {
-        // Keep running even if alt is down
         altNow = NaN;
         altNowMeta = `Alternative.me fetch failed: ${String(e.message || e)}`;
       }
 
-      // Start WS
       connectWS();
 
-      // Refresh external FGI occasionally
       setInterval(async () => {
         try { await refreshAlt(); } catch {}
       }, 60 * 1000);
 
-      // Main loop
       setInterval(() => {
         const mySnap = computeMyFgiLiveOnce();
         if (!mySnap) return;
 
-        // Update MyFGI tile
-        setTile("myFgi", "myMeta", mySnap.fgi, `raw=${fmt(mySnap.fgi_raw,2)} | alpha=${BASKET_ALPHA_LIVE} | weights: ${weightsSummary()} | ${new Date(mySnap.t_sec*1000).toLocaleString()}`);
+        setTile(
+          "myFgi", "myMeta", mySnap.fgi,
+          `raw=${fmt(mySnap.fgi_raw,2)} | alpha=${BASKET_ALPHA_LIVE} | weights: ${weightsSummary()} | ${new Date(mySnap.t_sec*1000).toLocaleString()}`
+        );
 
-        // Update Alt tile
         setTile("altFgi", "altMeta", altNow, altNowMeta);
 
-        // Compute AVG (renormalized on available sources)
         const { avg, meta } = computeAvgFgi(mySnap.fgi, altNow);
         setTile("avgFgi", "avgMeta", avg, meta);
 
-        // Update price stats + warnings
-        const pricePack = updatePriceStatsUI();
+        // Update BTC+ETH price stats and evaluate warnings per-asset (BTC and ETH)
+        const pricePackBySym = updatePriceStatsUI();
 
-        // Daily series for 3+ days check:
-        // - MyFGI daily from 72h minute series
-        // - Alt daily from last 3 history points
-        const myDaily = computeMyFgiDailyAveragesLast3Days(); // [{day,avg}]
-        const altDaily = computeAltDailyLast3();              // [{day,avg}]
+        const myDaily = computeMyFgiDailyAveragesLast3Days();
+        const altDaily = computeAltDailyLast3();
 
-        // Merge daily averages by dayKey (UTC) then compute avg FGI daily using renormalized weights
         const byDay = new Map();
         for (const x of myDaily) byDay.set(x.day, { day: x.day, my: x.avg, alt: NaN });
         for (const x of altDaily) {
@@ -1066,12 +1070,9 @@
           return { day: d.day, avg: r.avg };
         }).filter(x => Number.isFinite(x.avg));
 
-        evaluateWarnings(avg, pricePack, avgDaily);
+        evaluateWarnings(avg, pricePackBySym, avgDaily);
 
-        // Update per-asset table
         updateTable(mySnap.assets);
-
-        // Update chart
         maybeAppendChartPoint(mySnap);
 
       }, LIVE_UPDATE_EVERY_MS);
