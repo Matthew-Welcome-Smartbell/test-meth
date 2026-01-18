@@ -1,4 +1,4 @@
-<!doctype html>
+<!doctype html> 
 <html>
 <head>
   <meta charset="utf-8"/>
@@ -24,7 +24,7 @@
     .tileMeta { font-size: 12px; color: #666; margin-top: 4px; }
 
     /* warnings */
-    .warnBox { margin-top: 10px; padding: 10px; border-radius: 10px; border: 1px solid; white-space: pre-line; }
+    .warnBox { margin-top: 10px; padding: 10px; border-radius: 10px; border: 1px solid; }
     .warnRed { background: #fff1f1; border-color: #f0b5b5; color: #7a0000; font-weight: 700; }
     .warnYellow { background: #fff9e6; border-color: #f0d48a; color: #6a5200; font-weight: 700; }
 
@@ -133,13 +133,11 @@
     // MyFGI weights (mutable via UI)
     let WEIGHTS = { "BTCUSDT": 0.50, "ETHUSDT": 0.50 };
 
-    // Average weights requested previously (CoinGlass/CMC removed in Option 1).
-    // We renormalize using only available sources (my + alt).
-    const AVG_W_DESIRED = { my: 0.10, alt: 0.45 }; // sum=0.55; renormalize => my=0.1818 alt=0.8182
+    // Average weights (Option 1: only my + alt available; will renormalize on availability)
+    const AVG_W_DESIRED = { my: 0.10, alt: 0.45 };
 
     const ALT_URL = "https://api.alternative.me/fng/?limit=500&format=json";
 
-    // Prices + moving averages are computed for BOTH BTC and ETH (per your request).
     const PRICE_SYMBOLS = ["BTCUSDT", "ETHUSDT"];
 
     const LIVE_UPDATE_EVERY_MS = 5000;
@@ -171,10 +169,6 @@
       w_ob: 0.20,
       w_aggr: 0.20,
     };
-
-    // RED warning thresholds (both now use 5%)
-    const RED_PCT_30D = 0.05;
-    const RED_PCT_60D = 0.05;
 
     const EPS = 1e-12;
 
@@ -268,22 +262,6 @@
       return SYMBOLS.map(s => `${s}=${(WEIGHTS[s]*100).toFixed(1)}%`).join(" ");
     }
 
-    function update24hStatsFromChart(chart) {
-      const data = chart?.data?.datasets?.[0]?.data || [];
-      if (!data.length) return { hi: null, lo: null, avg: null, n: 0 };
-
-      let hi = -Infinity, lo = Infinity, sum = 0, n = 0;
-      for (const v of data) {
-        const x = Number(v);
-        if (!Number.isFinite(x)) continue;
-        if (x > hi) hi = x;
-        if (x < lo) lo = x;
-        sum += x; n++;
-      }
-      if (!n) return { hi: null, lo: null, avg: null, n: 0 };
-      return { hi, lo, avg: sum/n, n };
-    }
-
     function dayKeyUTC(tSec) {
       const d = new Date(tSec * 1000);
       return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
@@ -314,12 +292,11 @@
       const start = now - minutes * 60 * 1000;
       const out = [];
 
-      // Binance max 1000 klines per request. Page forward.
       let cursor = start;
       const end = now;
       let guard = 0;
 
-      while (cursor < end && guard < 20) {
+      while (cursor < end && guard < 50) {
         guard++;
         const batch = await fetchKlines(symbol, "1m", cursor, end, 1000);
         if (!batch.length) break;
@@ -356,7 +333,6 @@
       return { t, open, high, low, close, vol, takerBuy };
     }
 
-    // Compute per-minute asset scores from 1m candle data (approx core logic)
     function computeAssetFrom1m(series) {
       const { t, open, high, low, close, vol, takerBuy } = series;
       const n = t.length;
@@ -700,9 +676,7 @@
 
       if (myFgiSeries.length) prevBasketLive = myFgiSeries[myFgiSeries.length-1].fgi;
 
-      const stats = update24hStatsFromChart(chart);
-      el.textContent =
-        `MyFGI backfill: rendered ${slice.length} pts (24h). 24h high=${fmt(stats.hi)} low=${fmt(stats.lo)} avg=${fmt(stats.avg)}.`;
+      el.textContent = `MyFGI backfill: rendered ${slice.length} pts (24h).`;
     }
 
     function computeMyFgiDailyAveragesLast3Days() {
@@ -722,56 +696,42 @@
     }
 
     // ============================
-    // PRICE AVERAGES (BTC + ETH)
+    // PRICE AVERAGES (BTC+ETH)
     // ============================
-    const dailyClosesBySym = {}; // sym -> [{tSec, close}]
-    const livePriceBySym = {};   // sym -> last trade price from WS
+    let dailyCloses = { "BTCUSDT": null, "ETHUSDT": null };
+    let livePrices = { "BTCUSDT": null, "ETHUSDT": null };
 
     function avgLastNCloses(sym, n) {
-      const arr0 = dailyClosesBySym[sym];
+      const arr0 = dailyCloses[sym];
       if (!arr0 || arr0.length < n) return null;
       const arr = arr0.slice(-n).map(x => x.close).filter(v => Number.isFinite(v));
       if (arr.length < n) return null;
-      const sum = arr.reduce((a,b)=>a+b,0);
-      return sum / arr.length;
+      return arr.reduce((a,b)=>a+b,0) / arr.length;
     }
 
     async function loadDailyClosesAll() {
-      // pull enough for 90d + buffer
-      for (const sym of PRICE_SYMBOLS) {
-        dailyClosesBySym[sym] = await fetchDailyCloses(sym, 120);
-      }
-    }
-
-    function currentPrice(sym) {
-      if (Number.isFinite(livePriceBySym[sym])) return livePriceBySym[sym];
-      const dc = dailyClosesBySym[sym];
-      if (dc && dc.length) return dc[dc.length-1].close;
-      return null;
+      dailyCloses["BTCUSDT"] = await fetchDailyCloses("BTCUSDT", 120);
+      dailyCloses["ETHUSDT"] = await fetchDailyCloses("ETHUSDT", 120);
     }
 
     function updatePriceStatsUI() {
-      const lines = [];
-      const pack = {}; // sym -> { p, a7, a30, a60, a90 }
+      const parts = [];
+      const pack = {};
       for (const sym of PRICE_SYMBOLS) {
-        const p = currentPrice(sym);
+        const p = (livePrices[sym] != null) ? livePrices[sym] : (dailyCloses[sym]?.length ? dailyCloses[sym][dailyCloses[sym].length-1].close : null);
         const a7  = avgLastNCloses(sym, 7);
         const a30 = avgLastNCloses(sym, 30);
         const a60 = avgLastNCloses(sym, 60);
         const a90 = avgLastNCloses(sym, 90);
-        pack[sym] = { p, a7, a30, a60, a90 };
-
-        lines.push(
-          `${sym.replace("USDT","")}: price=${fmt(p,2)} | 7d avg=${fmt(a7,2)} | 30d avg=${fmt(a30,2)} | 60d avg=${fmt(a60,2)} | 90d avg=${fmt(a90,2)}`
-        );
+        pack[sym] = { p, a30, a60 };
+        parts.push(`${sym.replace("USDT","")}: p=${fmt(p,2)} | 7d=${fmt(a7,2)} 30d=${fmt(a30,2)} 60d=${fmt(a60,2)} 90d=${fmt(a90,2)}`);
       }
-
-      document.getElementById("priceStats").textContent = lines.join("   ||   ");
+      document.getElementById("priceStats").textContent = parts.join("  •  ");
       return pack;
     }
 
     // ============================
-    // AVERAGE FGI (Option 1: My + Alt only)
+    // AVERAGE FGI (My + Alt only)
     // ============================
     function computeAvgFgi(my, alt) {
       const wMy = Number(AVG_W_DESIRED.my || 0);
@@ -801,40 +761,83 @@
       el.textContent = msg;
     }
 
-    function evaluateWarnings(avgFgiNow, pricePackBySym, avgFgiDailyLast3) {
-      // RED conditions (duplicated for BTC and ETH) and now BOTH use 5%.
-      const redMsgs = [];
+    // FIX #1 IMPLEMENTED HERE:
+    // Strict 3-day check: only trigger if we have 3 consecutive days (by UTC dayKey)
+    // AND for each of those 3 days we have BOTH my+alt values (no renormalization-by-missing)
+    function buildStrictAvgDailyLast3(myDaily, altDaily) {
+      const myMap = new Map(myDaily.map(x => [x.day, x.avg]));
+      const altMap = new Map(altDaily.map(x => [x.day, x.avg]));
 
-      for (const sym of PRICE_SYMBOLS) {
-        const pp = pricePackBySym?.[sym] || {};
-        const p   = pp.p;
-        const a30 = pp.a30;
-        const a60 = pp.a60;
+      // Days where BOTH exist
+      const bothDays = Array.from(new Set([...myMap.keys()].filter(k => altMap.has(k)))).sort((a,b)=>a.localeCompare(b));
 
-        const tag = sym.replace("USDT","");
+      if (bothDays.length < 3) return [];
 
-        const red60 = (Number.isFinite(p) && Number.isFinite(a60) && Number.isFinite(avgFgiNow) &&
-                      p > a60 * (1 + RED_PCT_60D) && avgFgiNow < 40);
-
-        const red30 = (Number.isFinite(p) && Number.isFinite(a30) && Number.isFinite(avgFgiNow) &&
-                      p > a30 * (1 + RED_PCT_30D) && avgFgiNow < 40);
-
-        if (red60) redMsgs.push(`${tag}: price > 60d avg * ${(1+RED_PCT_60D).toFixed(2)} AND avg FGI < 40`);
-        if (red30) redMsgs.push(`${tag}: price > 30d avg * ${(1+RED_PCT_30D).toFixed(2)} AND avg FGI < 40`);
+      // Take the last 3 *consecutive* days in that list
+      // (Consecutive in UTC date terms)
+      function toDate(dayKey) {
+        const [y,m,d] = dayKey.split("-").map(Number);
+        return new Date(Date.UTC(y, m-1, d));
+      }
+      function isNextDay(aKey, bKey) {
+        const a = toDate(aKey).getTime();
+        const b = toDate(bKey).getTime();
+        return (b - a) === 24*3600*1000;
       }
 
-      setWarn("warnRed", redMsgs.length > 0, redMsgs.length ? `RED WARNING:\n- ${redMsgs.join("\n- ")}` : "");
+      // Walk from end backwards to find a 3-day consecutive run.
+      for (let i = bothDays.length - 1; i >= 2; i--) {
+        const d0 = bothDays[i-2], d1 = bothDays[i-1], d2 = bothDays[i];
+        if (isNextDay(d0, d1) && isNextDay(d1, d2)) {
+          // Compute daily avg using ORIGINAL desired weights (renormalization not needed because both present)
+          const wMy = Number(AVG_W_DESIRED.my || 0);
+          const wAlt = Number(AVG_W_DESIRED.alt || 0);
+          const sum = wMy + wAlt;
+          const myN = (sum > 0) ? (wMy / sum) : 0.5;
+          const altN = (sum > 0) ? (wAlt / sum) : 0.5;
+
+          return [d0,d1,d2].map(day => {
+            const my = myMap.get(day);
+            const alt = altMap.get(day);
+            const avg = clamp(myN*my + altN*alt);
+            return { day, avg, my, alt };
+          });
+        }
+      }
+      return [];
+    }
+
+    function evaluateWarnings(avgFgiNow, pricePack, strictAvg3Days) {
+      // RED warnings based on avgFgiNow + price levels on BOTH BTC and ETH
+      const redMsg = [];
+
+      for (const sym of PRICE_SYMBOLS) {
+        const p = pricePack?.[sym]?.p;
+        const a30 = pricePack?.[sym]?.a30;
+        const a60 = pricePack?.[sym]?.a60;
+
+        const red60 = (Number.isFinite(p) && Number.isFinite(a60) && Number.isFinite(avgFgiNow) && avgFgiNow < 40 && p > a60 * 1.05);
+        const red30 = (Number.isFinite(p) && Number.isFinite(a30) && Number.isFinite(avgFgiNow) && avgFgiNow < 40 && p > a30 * 1.05);
+
+        if (red60) redMsg.push(`${sym.replace("USDT","")}: price > 60d avg * 1.05 AND avg FGI < 40`);
+        if (red30) redMsg.push(`${sym.replace("USDT","")}: price > 30d avg * 1.05 AND avg FGI < 40`);
+      }
+
+      setWarn("warnRed", redMsg.length > 0, redMsg.length ? `RED WARNING: ${redMsg.join(" | ")}` : "");
 
       // YELLOW #1
       const y1 = (Number.isFinite(avgFgiNow) && avgFgiNow > 50);
       setWarn("warnY1", y1, y1 ? "WARNING: average FGI > 50, use reduced leverage" : "");
 
-      // YELLOW #2: avg FGI < 37 for 3+ days
+      // YELLOW #2 (STRICT): need 3 consecutive days WITH BOTH sources
       let y2 = false;
-      if (avgFgiDailyLast3 && avgFgiDailyLast3.length >= 3) {
-        y2 = avgFgiDailyLast3.slice(-3).every(x => Number.isFinite(x.avg) && x.avg < 37);
+      if (strictAvg3Days && strictAvg3Days.length === 3) {
+        y2 = strictAvg3Days.every(x => Number.isFinite(x.avg) && x.avg < 37);
       }
-      setWarn("warnY2", y2, y2 ? "WARNING: FGI < 37 for 3 or more days, possible drawdown, use reduced leverage" : "");
+      const y2Msg = y2
+        ? `WARNING: avg FGI < 37 for 3 consecutive days (both sources present), possible drawdown, use reduced leverage`
+        : "";
+      setWarn("warnY2", y2, y2Msg);
     }
 
     // ============================
@@ -872,7 +875,7 @@
 
         if (stream.endsWith("@aggTrade")) {
           liveStates[sym].onAggTrade(Number(d.E), Number(d.p), Number(d.q), Boolean(d.m));
-          if (PRICE_SYMBOLS.includes(sym)) livePriceBySym[sym] = Number(d.p);
+          if (PRICE_SYMBOLS.includes(sym)) livePrices[sym] = Number(d.p);
           return;
         }
         if (stream.includes("@depth10")) {
@@ -969,7 +972,7 @@
     }
 
     // ============================
-    // WEIGHTS UI WIRING
+    // WEIGHTS UI
     // ============================
     function initWeightsUI() {
       const r0 = normalizeWeights(WEIGHTS);
@@ -1010,7 +1013,6 @@
       initWeightsUI();
       setConn("disconnected");
 
-      // Daily closes for BOTH BTC and ETH
       try {
         await loadDailyClosesAll();
       } catch (e) {
@@ -1041,7 +1043,8 @@
         if (!mySnap) return;
 
         setTile(
-          "myFgi", "myMeta", mySnap.fgi,
+          "myFgi", "myMeta",
+          mySnap.fgi,
           `raw=${fmt(mySnap.fgi_raw,2)} | alpha=${BASKET_ALPHA_LIVE} | weights: ${weightsSummary()} | ${new Date(mySnap.t_sec*1000).toLocaleString()}`
         );
 
@@ -1050,27 +1053,15 @@
         const { avg, meta } = computeAvgFgi(mySnap.fgi, altNow);
         setTile("avgFgi", "avgMeta", avg, meta);
 
-        // Update BTC+ETH price stats and evaluate warnings per-asset (BTC and ETH)
-        const pricePackBySym = updatePriceStatsUI();
+        const pricePack = updatePriceStatsUI();
 
-        const myDaily = computeMyFgiDailyAveragesLast3Days();
-        const altDaily = computeAltDailyLast3();
+        const myDaily = computeMyFgiDailyAveragesLast3Days(); // [{day,avg}]
+        const altDaily = computeAltDailyLast3();              // [{day,avg}]
 
-        const byDay = new Map();
-        for (const x of myDaily) byDay.set(x.day, { day: x.day, my: x.avg, alt: NaN });
-        for (const x of altDaily) {
-          const o = byDay.get(x.day) || { day: x.day, my: NaN, alt: NaN };
-          o.alt = x.avg;
-          byDay.set(x.day, o);
-        }
-        const dailyMerged = Array.from(byDay.values()).sort((a,b)=>a.day.localeCompare(b.day));
+        // FIX #1: strict daily avg series for 3-day warning
+        const strictAvg3 = buildStrictAvgDailyLast3(myDaily, altDaily);
 
-        const avgDaily = dailyMerged.map(d => {
-          const r = computeAvgFgi(d.my, d.alt);
-          return { day: d.day, avg: r.avg };
-        }).filter(x => Number.isFinite(x.avg));
-
-        evaluateWarnings(avg, pricePackBySym, avgDaily);
+        evaluateWarnings(avg, pricePack, strictAvg3);
 
         updateTable(mySnap.assets);
         maybeAppendChartPoint(mySnap);
