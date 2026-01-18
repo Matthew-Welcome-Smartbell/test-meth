@@ -3,98 +3,128 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Live Crypto FGI (BTC/ETH 50/50, 24h Backfill, No Storage)</title>
+  <title>Live Crypto FGI (BTC/ETH, 24h Backfill, No Storage)</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 16px; }
     .card { border: 1px solid #ddd; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
-    .big { font-size: 44px; font-weight: 700; }
     .muted { color: #666; }
-    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-start; }
-    .col { flex:1 1 220px; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; font-size: 14px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items: stretch; }
+    .col { flex:1 1 240px; }
+    .big { font-size: 40px; font-weight: 700; line-height: 1.1; }
     .pill { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #ddd; font-size:12px; }
     canvas { width: 100%; max-height: 320px; }
     .small { font-size: 12px; }
     code { background:#f7f7f7; padding:2px 4px; border-radius:6px; }
     .warn { color: #8a5a00; }
-    input[type="number"] { width: 110px; padding: 6px; border: 1px solid #ddd; border-radius: 8px; }
+    input[type="number"], input[type="text"] { width: 150px; padding: 6px; border: 1px solid #ddd; border-radius: 8px; }
     button { padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background: #f7f7f7; cursor: pointer; }
     button:hover { background: #efefef; }
     .err { color: #a40000; }
-    .ok  { color: #0b6b0b; }
-    .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; font-size: 14px; }
+    .kpiLabel { font-size: 12px; color:#666; }
+    .kpiBox { border: 1px solid #eee; border-radius: 12px; padding: 10px; }
+    .kpiTop { display:flex; justify-content:space-between; align-items:center; gap:10px; }
   </style>
 </head>
 <body>
 
+  <!-- Top: 3 FGIs side-by-side -->
   <div class="card">
+    <div class="muted small" style="margin-bottom:10px;">
+      Live updates: your FGI every <code>5s</code>, chart <code>1/min</code>. External FGIs refresh periodically.
+    </div>
     <div class="row">
-      <div class="col">
-        <div class="muted">Basket FGI (live updates every 5s; chart is 1/min)</div>
+      <div class="col kpiBox">
+        <div class="kpiTop">
+          <div class="kpiLabel">Your Basket FGI (BTC/ETH)</div>
+          <span id="conn" class="pill">disconnected</span>
+        </div>
         <div id="fgi" class="big">--</div>
         <div id="meta" class="muted small"></div>
         <div id="stats" class="muted small"></div>
         <div id="backfill" class="muted small"></div>
         <div class="small warn" style="margin-top:6px;">
-          Backfill uses candles only (no historical order book/trade aggressor available from public Binance endpoints in-browser).
-          Live uses WS depth10 + aggTrade.
+          Note: historical order book isn’t available from Binance; OB uses a candle-based proxy for the 24h backfill.
         </div>
       </div>
-      <div class="col">
-        <div class="muted">Connection</div>
-        <div id="conn" class="pill">disconnected</div>
-        <div class="muted small" style="margin-top:8px;">
-          REST backfill: <code>/api/v3/klines</code> (1m)<br/>
-          Live: <code>aggTrade</code> + <code>depth10</code>
+
+      <div class="col kpiBox">
+        <div class="kpiLabel">Alternative.me FGI</div>
+        <div id="altFgi" class="big">--</div>
+        <div id="altMeta" class="muted small"></div>
+        <div class="muted small">
+          Source: <code>api.alternative.me/fng</code>
+        </div>
+      </div>
+
+      <div class="col kpiBox">
+        <div class="kpiLabel">CoinMarketCap FGI</div>
+        <div id="cmcFgi" class="big">--</div>
+        <div id="cmcMeta" class="muted small"></div>
+        <div class="muted small">
+          Uses optional proxy (recommended).
+        </div>
+      </div>
+    </div>
+
+    <!-- Avg prices -->
+    <div style="margin-top:12px;">
+      <div class="muted">Average prices (simple mean of daily closes)</div>
+      <div class="row" style="margin-top:8px;">
+        <div class="col">
+          <div class="small muted">BTCUSDT</div>
+          <div class="small" id="avgBTC">Loading…</div>
+        </div>
+        <div class="col">
+          <div class="small muted">ETHUSDT</div>
+          <div class="small" id="avgETH">Loading…</div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Weights UI (BTC/ETH only; must stay 50/50 by requirement) -->
-  <div class="card">
-    <div class="muted">Basket weights (fixed to BTC/ETH 50/50)</div>
-    <div class="row" style="margin-top:10px;">
-      <div class="col">
-        <div class="small muted">BTCUSDT</div>
-        <input id="w_BTCUSDT" type="number" step="0.01" min="0" value="0.50" disabled/>
-      </div>
-      <div class="col">
-        <div class="small muted">ETHUSDT</div>
-        <input id="w_ETHUSDT" type="number" step="0.01" min="0" value="0.50" disabled/>
-      </div>
-    </div>
-    <div class="small muted" style="margin-top:6px;">
-      Note: weights are intentionally locked to 50/50. (This keeps live and historic comparable and avoids “weight drift”.)
-    </div>
-  </div>
-
+  <!-- Chart -->
   <div class="card">
     <div class="muted">FGI history (last 24h, 1 point/min)</div>
-    <div class="row" style="margin-top:8px;">
-      <div class="col">
-        <div class="small muted">Chart series</div>
-        <div class="row" style="gap:8px;">
-          <button id="btnShowSmoothed" type="button">Show smoothed</button>
-          <button id="btnShowRaw" type="button">Show raw</button>
-          <span id="seriesStatus" class="small muted"></span>
-        </div>
-      </div>
-      <div class="col">
-        <div class="small muted">Stats mode</div>
-        <div class="row" style="gap:8px;">
-          <button id="btnStatsSmoothed" type="button">Stats: smoothed</button>
-          <button id="btnStatsRaw" type="button">Stats: raw</button>
-          <span id="statsStatus" class="small muted"></span>
-        </div>
-      </div>
-    </div>
-    <canvas id="chart" style="margin-top:10px;"></canvas>
+    <canvas id="chart"></canvas>
   </div>
 
+  <!-- Weights UI (moved under graph) -->
   <div class="card">
-    <div class="muted">Per-asset components (live)</div>
+    <div class="muted">Basket weights (BTC/ETH only; auto-normalized to sum to 1)</div>
+
+    <div class="row" style="margin-top:10px;">
+      <div class="col">
+        <div class="small muted">BTC weight</div>
+        <input id="w_BTCUSDT" type="number" step="0.01" min="0" value="0.50"/>
+      </div>
+      <div class="col">
+        <div class="small muted">ETH weight</div>
+        <input id="w_ETHUSDT" type="number" step="0.01" min="0" value="0.50"/>
+      </div>
+      <div class="col">
+        <div class="small muted">CMC Proxy URL (optional)</div>
+        <input id="cmcProxy" type="text" placeholder="https://your-proxy.example/fgi"/>
+        <div class="small muted">If blank, CMC shows “N/A”.</div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:10px; align-items:center;">
+      <button id="btnNormalize" type="button">Normalize</button>
+      <button id="btnApply" type="button">Apply (recompute 24h + live)</button>
+      <span id="wStatus" class="small muted"></span>
+      <span id="wError" class="small err"></span>
+    </div>
+
+    <div class="small muted" style="margin-top:6px;">
+      Tip: enter any non-negative numbers (e.g. 2 and 1 becomes 66.7% / 33.3%).
+    </div>
+  </div>
+
+  <!-- Live components -->
+  <div class="card">
+    <div class="muted">Per-asset components (live, computed from WS)</div>
     <table>
       <thead>
         <tr>
@@ -107,38 +137,23 @@
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
-    // ============================================================
-    // CHANGES REQUESTED (implemented)
-    // 1) Only BTC/ETH, fixed 50/50
-    // 2) Backfill smoothing removed by default (raw is available)
-    // 3) 24h stats can be computed from RAW (default) instead of smoothed
-    // 4) Backfill and live are explicitly separated: backfill uses candle-only
-    //    and (by design) uses mom/vol only to avoid fake OB/aggr proxies.
-    // ============================================================
-
     // ----------------------------
     // Config
     // ----------------------------
     const SYMBOLS = ["BTCUSDT", "ETHUSDT"];
 
-    // Fixed weights
-    const WEIGHTS = {
-      "BTCUSDT": 0.50,
-      "ETHUSDT": 0.50,
-    };
+    // Runtime weights (BTC/ETH only) - default 50/50
+    let WEIGHTS = { "BTCUSDT": 0.50, "ETHUSDT": 0.50 };
 
-    // Live compute cadence (display updates)
-    const LIVE_UPDATE_EVERY_MS = 5000;
+    // Update cadences
+    const LIVE_UPDATE_EVERY_MS = 5000;          // your FGI display cadence
+    const CHART_POINT_SECONDS = 60;             // chart 1 point / minute
+    const EXTERNAL_FGI_REFRESH_MS = 60_000;     // external FGI refresh
+    const PRICE_AVG_REFRESH_MS = 30 * 60_000;   // refresh avg prices every 30 minutes
 
-    // Chart cadence: 1 point per minute
-    const CHART_POINT_SECONDS = 60;
-
-    // Basket EMA smoothing for live display
+    // EMA smoothing for displayed series
     const BASKET_ALPHA_LIVE = 0.10;
-
-    // Backfill smoothing (default OFF for transparency)
-    // You can toggle chart series between raw and smoothed.
-    const ALPHA_BACKFILL = 0.10; // only used for "smoothed" backfill series
+    const ALPHA_BACKFILL = 0.10; // keep consistent with live to avoid mismatch
 
     // FGI core parameters (seconds)
     const P = {
@@ -149,8 +164,6 @@
       imb_window_s: 20,
       aggr_window_s: 1200,
 
-      // NOTE: These are still heuristic. If your outputs stick near 50,
-      // your k values are likely too large for realized returns/vol.
       k_m_short: 0.005,
       k_m_long: 0.02,
       k_v_short: 0.01,
@@ -159,15 +172,10 @@
       mom_blend_short: 0.5,
       vol_blend_short: 0.5,
 
-      // Live weights across components
       w_mom: 0.35,
       w_vol: 0.25,
       w_ob: 0.20,
       w_aggr: 0.20,
-
-      // Backfill (candle-only) weights: USE ONLY mom/vol to avoid fake OB/aggr
-      bf_w_mom: 0.60,
-      bf_w_vol: 0.40,
     };
 
     const EPS = 1e-12;
@@ -196,10 +204,7 @@
       for (const v of arr) mean += v;
       mean /= n;
       let ss = 0;
-      for (const v of arr) {
-        const d = v - mean;
-        ss += d*d;
-      }
+      for (const v of arr) { const d = v - mean; ss += d*d; }
       return Math.sqrt(ss / n);
     }
 
@@ -222,73 +227,225 @@
       el.style.borderColor = (status === "connected") ? "#b8e0b8" : "#f0b5b5";
     }
 
+    function update24hStatsFromChart() {
+      if (!chart) return;
+      const data = chart.data.datasets[0].data || [];
+      if (!data.length) {
+        document.getElementById("stats").textContent = "";
+        return;
+      }
+      let hi = -Infinity, lo = Infinity, sum = 0, n = 0;
+      for (const v of data) {
+        const x = Number(v);
+        if (!Number.isFinite(x)) continue;
+        if (x > hi) hi = x;
+        if (x < lo) lo = x;
+        sum += x;
+        n++;
+      }
+      if (!n) return;
+      const avg = sum / n;
+      document.getElementById("stats").textContent =
+        `24h FGI: high=${hi.toFixed(2)}  low=${lo.toFixed(2)}  avg=${avg.toFixed(2)}  (points=${n})`;
+    }
+
+    function normalizeWeights(obj) {
+      const clean = {};
+      let sum = 0;
+      for (const sym of SYMBOLS) {
+        const v = Number(obj[sym]);
+        const w = (Number.isFinite(v) && v > 0) ? v : 0;
+        clean[sym] = w;
+        sum += w;
+      }
+      if (sum <= 0) return { ok: false, weights: null, msg: "Weights sum to 0. Enter at least one positive weight." };
+      for (const sym of SYMBOLS) clean[sym] = clean[sym] / sum;
+      return { ok: true, weights: clean, msg: "Normalized (sum=1)." };
+    }
+
+    function readWeightsFromUI() {
+      return {
+        "BTCUSDT": Number(document.getElementById("w_BTCUSDT").value),
+        "ETHUSDT": Number(document.getElementById("w_ETHUSDT").value),
+      };
+    }
+
+    function writeWeightsToUI(w) {
+      document.getElementById("w_BTCUSDT").value = (Number(w["BTCUSDT"]) || 0).toFixed(4);
+      document.getElementById("w_ETHUSDT").value = (Number(w["ETHUSDT"]) || 0).toFixed(4);
+    }
+
+    function setWeightStatus(msg, isError=false) {
+      document.getElementById("wStatus").textContent = isError ? "" : msg;
+      document.getElementById("wError").textContent = isError ? msg : "";
+    }
+
+    function weightsSummary() {
+      return SYMBOLS.map(s => `${s}=${(WEIGHTS[s]*100).toFixed(1)}%`).join(" ");
+    }
+
     // ----------------------------
-    // Binance REST backfill (1m klines)
+    // External FGIs (Alternative.me + CMC via optional proxy)
     // ----------------------------
-    async function fetchKlines(symbol, interval, startMs, endMs) {
+    async function fetchAlternativeMeFGI() {
+      // Public endpoint
+      const url = "https://api.alternative.me/fng/?limit=1&format=json";
+      const res = await fetch(url, { method: "GET" });
+      if (!res.ok) throw new Error(`Alternative.me fetch failed: ${res.status}`);
+      const j = await res.json();
+      const row = j?.data?.[0];
+      const value = row ? Number(row.value) : NaN;
+      const classification = row?.value_classification || "";
+      const ts = row?.timestamp ? Number(row.timestamp) : null; // seconds
+      return { value, classification, t_sec: ts };
+    }
+
+    // CMC requires API key; do NOT call directly from browser.
+    // Provide a proxy endpoint YOU host that injects the key server-side.
+    // Expected proxy response formats supported:
+    //  A) { value: 73, classification: "...", updatedAt: "..." }
+    //  B) Raw CMC Pro response: { data: [{ value: 73, value_classification: "...", timestamp: ... }] }
+    async function fetchCMCFGIViaProxy(proxyUrl) {
+      if (!proxyUrl) return { value: NaN, note: "N/A (no proxy configured)" };
+      const res = await fetch(proxyUrl, { method: "GET" });
+      if (!res.ok) throw new Error(`CMC proxy fetch failed: ${res.status}`);
+      const j = await res.json();
+
+      // Format A
+      if (j && Number.isFinite(Number(j.value))) {
+        return {
+          value: Number(j.value),
+          classification: String(j.classification || ""),
+          t_sec: j.updatedAt ? Math.floor(new Date(j.updatedAt).getTime()/1000) : null,
+          note: ""
+        };
+      }
+
+      // Format B
+      const row = j?.data?.[0];
+      if (row && Number.isFinite(Number(row.value))) {
+        return {
+          value: Number(row.value),
+          classification: String(row.value_classification || ""),
+          t_sec: row.timestamp ? Number(row.timestamp) : null,
+          note: ""
+        };
+      }
+
+      return { value: NaN, note: "Unrecognized proxy response" };
+    }
+
+    function renderExternalFGI(idValue, idMeta, label, obj) {
+      const el = document.getElementById(idValue);
+      const meta = document.getElementById(idMeta);
+
+      if (!Number.isFinite(obj.value)) {
+        el.textContent = "--";
+        el.style.color = "black";
+        meta.textContent = obj.note ? obj.note : `${label}: unavailable`;
+        return;
+      }
+
+      el.textContent = fmt(obj.value, 0);
+      el.style.color = colorForFGI(obj.value);
+
+      const when = obj.t_sec ? new Date(obj.t_sec * 1000).toLocaleString() : "";
+      const cls = obj.classification ? ` | ${obj.classification}` : "";
+      meta.textContent = `${when}${cls}`;
+    }
+
+    // ----------------------------
+    // Binance REST for backfill + avg prices
+    // ----------------------------
+    async function fetchKlines(symbol, interval, startMs, endMs, limit=1000) {
       const url = new URL("https://api.binance.com/api/v3/klines");
       url.searchParams.set("symbol", symbol);
       url.searchParams.set("interval", interval);
-      url.searchParams.set("startTime", String(startMs));
-      url.searchParams.set("endTime", String(endMs));
-      url.searchParams.set("limit", "1000");
+      if (startMs != null) url.searchParams.set("startTime", String(startMs));
+      if (endMs != null) url.searchParams.set("endTime", String(endMs));
+      url.searchParams.set("limit", String(limit));
 
       const res = await fetch(url.toString(), { method: "GET" });
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
         throw new Error(`Klines fetch failed ${res.status}: ${txt}`);
       }
-      return await res.json();
+      return await res.json(); // array-of-arrays
     }
 
     async function fetchLast24h1m(symbol) {
       const now = Date.now();
       const start = now - 24 * 3600 * 1000;
 
-      // Up to 1440 points; API limit 1000, so do 2 chunks
+      // Need up to 1440 points; Binance limit is 1000 => two chunks.
       const mid = start + 1000 * 60 * 1000;
+      const part1 = await fetchKlines(symbol, "1m", start, mid, 1000);
+      const part2 = await fetchKlines(symbol, "1m", mid, now, 1000);
 
-      const part1 = await fetchKlines(symbol, "1m", start, mid);
-      const part2 = await fetchKlines(symbol, "1m", mid, now);
-
-      // Merge + de-dup by openTime
+      // merge + de-dup by openTime
       const map = new Map();
       for (const k of [...part1, ...part2]) map.set(k[0], k);
-      const merged = Array.from(map.entries())
-        .sort((a,b) => a[0] - b[0])
-        .map(e => e[1]);
-
+      const merged = Array.from(map.entries()).sort((a,b)=>a[0]-b[0]).map(e=>e[1]);
       return merged.filter(k => k[0] >= start && k[0] <= now);
     }
 
-    // Binance kline format:
-    // [
-    //  0 openTime, 1 open, 2 high, 3 low, 4 close, 5 volume,
-    //  6 closeTime, 7 quoteAssetVolume, 8 numberOfTrades,
-    //  9 takerBuyBaseAssetVolume, 10 takerBuyQuoteAssetVolume, 11 ignore
-    // ]
-    function klinesToSeries(klines) {
-      const t = [];
-      const open = [];
-      const high = [];
-      const low = [];
-      const close = [];
-      const vol = [];
+    async function fetchDailyCloses(symbol, days=90) {
+      // /api/v3/klines supports limit up to 1000; use 1d interval and limit=days
+      const kl = await fetchKlines(symbol, "1d", null, null, days);
+      // kline: [0 openTime, 4 close, ...]
+      const closes = kl.map(k => Number(k[4])).filter(x => Number.isFinite(x));
+      return closes;
+    }
 
+    function mean(arr) {
+      if (!arr.length) return NaN;
+      let s = 0;
+      for (const x of arr) s += x;
+      return s / arr.length;
+    }
+
+    async function refreshAvgPrices() {
+      try {
+        const [btc, eth] = await Promise.all([
+          fetchDailyCloses("BTCUSDT", 90),
+          fetchDailyCloses("ETHUSDT", 90),
+        ]);
+
+        const btc7 = mean(btc.slice(-7));
+        const btc30 = mean(btc.slice(-30));
+        const btc90 = mean(btc.slice(-90));
+
+        const eth7 = mean(eth.slice(-7));
+        const eth30 = mean(eth.slice(-30));
+        const eth90 = mean(eth.slice(-90));
+
+        document.getElementById("avgBTC").textContent =
+          `1W=${fmt(btc7,0)}  | 30D=${fmt(btc30,0)}  | 90D=${fmt(btc90,0)}`;
+        document.getElementById("avgETH").textContent =
+          `1W=${fmt(eth7,0)}  | 30D=${fmt(eth30,0)}  | 90D=${fmt(eth90,0)}`;
+      } catch (e) {
+        document.getElementById("avgBTC").textContent = `Avg price fetch failed: ${String(e.message || e)}`;
+        document.getElementById("avgETH").textContent = `Avg price fetch failed: ${String(e.message || e)}`;
+      }
+    }
+
+    function klinesToSeries(klines) {
+      const t = [], open = [], high = [], low = [], close = [], vol = [], takerBuy = [];
       for (const k of klines) {
-        t.push(Math.floor(Number(k[0]) / 1000)); // seconds
+        t.push(Math.floor(Number(k[0]) / 1000));
         open.push(Number(k[1]));
         high.push(Number(k[2]));
         low.push(Number(k[3]));
         close.push(Number(k[4]));
         vol.push(Number(k[5]));
+        takerBuy.push(Number(k[9]));
       }
-      return { t, open, high, low, close, vol };
+      return { t, open, high, low, close, vol, takerBuy };
     }
 
-    // Backfill: compute per-minute MOM + VOL only (no OB/aggr proxies)
-    function computeAssetFrom1m_Backfill(series) {
-      const { t, close } = series;
+    // Candle-derived scoring (backfill approximation)
+    function computeAssetFrom1m(series) {
+      const { t, open, high, low, close, vol, takerBuy } = series;
       const n = t.length;
 
       const ret = new Array(n).fill(NaN);
@@ -301,13 +458,25 @@
       const ml = Math.max(1, Math.round(P.mom_long_s / 60));
       const vs = Math.max(1, Math.round(P.vol_short_s / 60));
       const vl = Math.max(1, Math.round(P.vol_long_s / 60));
+      const iw = Math.max(1, Math.round(P.imb_window_s / 60));
+      const aw = Math.max(1, Math.round(P.aggr_window_s / 60));
 
       const mom = new Array(n).fill(NaN);
       const volScore = new Array(n).fill(NaN);
+      const ob = new Array(n).fill(NaN);
+      const aggr = new Array(n).fill(NaN);
       const asset = new Array(n).fill(NaN);
 
+      // OB proxy: (close-open)/(high-low) clamped to [-1,1]
+      const imbProxy = new Array(n).fill(0);
       for (let i=0; i<n; i++) {
-        // Momentum short/long
+        const rng = (high[i] - low[i]);
+        if (rng > 0) imbProxy[i] = Math.max(-1, Math.min(1, (close[i] - open[i]) / (rng + EPS)));
+        else imbProxy[i] = 0;
+      }
+
+      for (let i=0; i<n; i++) {
+        // Momentum
         if (i - ms >= 0 && close[i-ms] > 0 && close[i] > 0) {
           const rS = Math.log(close[i] / (close[i-ms] + EPS));
           const momS = tanhScoreSigned(rS, P.k_m_short);
@@ -322,7 +491,7 @@
           mom[i] = momVal;
         }
 
-        // Volatility short/long (std of log returns)
+        // Volatility (std of log returns)
         const retsS = [];
         for (let j=Math.max(1, i - vs + 1); j<=i; j++) if (Number.isFinite(ret[j])) retsS.push(ret[j]);
         const volS = std(retsS);
@@ -336,19 +505,31 @@
         const aV = clamp(P.vol_blend_short, 0, 1);
         volScore[i] = aV * volSScore + (1 - aV) * volLScore;
 
+        // OB proxy mean over iw
+        let sumImb = 0, cntImb = 0;
+        for (let j=Math.max(0, i - iw + 1); j<=i; j++) { sumImb += imbProxy[j]; cntImb++; }
+        ob[i] = clamp(50 + 50 * (cntImb ? (sumImb / cntImb) : 0));
+
+        // Aggression proxy: taker buy ratio
+        let bSum = 0, vSum = 0;
+        for (let j=Math.max(0, i - aw + 1); j<=i; j++) { bSum += takerBuy[j]; vSum += vol[j]; }
+        aggr[i] = (vSum > 0) ? clamp(100 * (bSum / (vSum + EPS))) : 50;
+
         if (Number.isFinite(mom[i])) {
           asset[i] = clamp(
-            P.bf_w_mom * mom[i] +
-            P.bf_w_vol * volScore[i]
+            P.w_mom * mom[i] +
+            P.w_vol * volScore[i] +
+            P.w_ob  * ob[i] +
+            P.w_aggr * aggr[i]
           );
         }
       }
 
-      return { t, close, mom, vol: volScore, asset };
+      return { t, close, mom, vol: volScore, ob, aggr, asset };
     }
 
     // ----------------------------
-    // Live WS state (for live per-asset table + current FGI)
+    // Live WS state (aggTrade + depth10)
     // ----------------------------
     class Rolling1s {
       constructor() { this.arr = []; } // {t, v}
@@ -361,17 +542,16 @@
     class LiveSymbolState {
       constructor(symbol) {
         this.symbol = symbol;
-        this.prices = new Rolling1s(); // per-second last price
-        this.rets = new Rolling1s();   // per-second log returns
+        this.prices = new Rolling1s();
+        this.rets = new Rolling1s();
         this.buy1s = new Rolling1s();
         this.sell1s = new Rolling1s();
-        this.imb = new Rolling1s();    // signed imbalance [-1,1] from depth10
+        this.imb = new Rolling1s();
 
         this.curSec = null;
         this.curPrice = null;
         this.curBuy = 0;
         this.curSell = 0;
-
         this._lastRetPrice = null;
       }
 
@@ -390,12 +570,10 @@
 
       flushSecond(sec, price, buyQty, sellQty) {
         this.prices.push(sec, price);
-
         if (this._lastRetPrice != null && this._lastRetPrice > 0 && price > 0) {
           this.rets.push(sec, Math.log(price / (this._lastRetPrice + EPS)));
         }
         this._lastRetPrice = price;
-
         this.buy1s.push(sec, buyQty);
         this.sell1s.push(sec, sellQty);
       }
@@ -419,6 +597,7 @@
           return;
         }
 
+        // flush previous second
         this.flushSecond(this.curSec, Number(this.curPrice ?? price), this.curBuy, this.curSell);
 
         // fill small gaps (cap)
@@ -430,6 +609,7 @@
           for (let s=this.curSec + 1; s<=fillTo; s++) this.flushSecond(s, lastP, 0, 0);
         }
 
+        // reset current
         this.curSec = sec;
         this.curPrice = price;
         this.curBuy = 0;
@@ -459,10 +639,10 @@
 
       compute(nowSec) {
         this.prune(nowSec);
-
         const pNow = this.prices.latest();
         if (!(pNow > 0)) return null;
 
+        // Momentum short/long
         const pS = this.priceAtOrAfter(nowSec - P.mom_short_s);
         if (!(pS > 0)) return null;
 
@@ -478,6 +658,7 @@
           mom = a * momS + (1 - a) * momL;
         }
 
+        // Vol
         const retsS = this.rets.valuesSince(nowSec - P.vol_short_s);
         const volS = std(retsS);
         const volSScore = tanhScoreNegative(volS, P.k_v_short);
@@ -489,13 +670,15 @@
         const aV = clamp(P.vol_blend_short, 0, 1);
         const vol = aV * volSScore + (1 - aV) * volLScore;
 
+        // OB (real)
         const imbs = this.imb.valuesSince(nowSec - P.imb_window_s);
         let ob = 50;
         if (imbs.length) {
-          const mean = imbs.reduce((a,b)=>a+b,0) / imbs.length;
-          ob = clamp(50 + 50 * mean);
+          const meanImb = imbs.reduce((a,b)=>a+b,0) / imbs.length;
+          ob = clamp(50 + 50 * meanImb);
         }
 
+        // Aggression (real)
         const buys = this.buy1s.valuesSince(nowSec - P.aggr_window_s);
         const sells = this.sell1s.valuesSince(nowSec - P.aggr_window_s);
         const bSum = buys.reduce((a,b)=>a+b,0);
@@ -543,42 +726,32 @@
     }
 
     // ----------------------------
-    // Backfill cache + recompute
+    // Backfill cache + recompute (weights update uses cache)
     // ----------------------------
+    let backfillSeries = [];    // [{t_sec,fgi_raw,fgi}]
     let backfillCache = null;   // { commonT, idx, bySym }
-    let backfillSeriesRaw = [];      // [{t_sec,fgi_raw}]  (no smoothing)
-    let backfillSeriesSmoothed = []; // [{t_sec,fgi,fgi_raw}] (EMA on top of raw)
     let prevBasketLive = 50.0;
     let lastChartMinute = null;
 
-    // UI state: which series is displayed, and which series is used for stats
-    let chartMode = "raw";   // "raw" or "smoothed"
-    let statsMode = "raw";   // "raw" or "smoothed"
-
-    function setSeriesStatus() {
-      document.getElementById("seriesStatus").textContent = `Chart: ${chartMode}`;
-      document.getElementById("statsStatus").textContent = `Stats: ${statsMode}`;
-    }
-
     async function loadBackfillCacheOnce() {
       const el = document.getElementById("backfill");
-      el.textContent = "Backfill: starting 24h fetch…";
+      el.textContent = "Backfill: fetching 24h klines…";
 
       const bySym = {};
       for (const sym of SYMBOLS) {
         el.textContent = `Backfill: fetching ${sym}…`;
         const kl = await fetchLast24h1m(sym);
-        bySym[sym] = computeAssetFrom1m_Backfill(klinesToSeries(kl));
+        bySym[sym] = computeAssetFrom1m(klinesToSeries(kl));
       }
 
-      // Align on common minutes
+      // align on common timestamps
       const ref = bySym[SYMBOLS[0]].t;
       const has = {};
       for (const sym of SYMBOLS) has[sym] = new Set(bySym[sym].t);
-
       const commonT = ref.filter(ts => SYMBOLS.every(sym => has[sym].has(ts)));
+
       if (!commonT.length) {
-        el.textContent = "Backfill: no overlapping timestamps across symbols (check REST access).";
+        el.textContent = "Backfill: no overlapping timestamps (check REST access).";
         backfillCache = null;
         return;
       }
@@ -591,21 +764,18 @@
 
       backfillCache = { commonT, idx, bySym };
       el.textContent = `Backfill: cache ready (${commonT.length} minutes). Rendering…`;
-
       recomputeBackfillFromCache();
     }
 
     function recomputeBackfillFromCache() {
       const el = document.getElementById("backfill");
-      if (!backfillCache) {
-        el.textContent = "Backfill: cache not ready.";
-        return;
-      }
+      if (!backfillCache) { el.textContent = "Backfill: cache not ready."; return; }
 
       const { commonT, idx, bySym } = backfillCache;
 
-      // Raw series (no smoothing)
-      const rawOut = [];
+      const out = [];
+      let prev = 50.0;
+
       for (const ts of commonT) {
         let total = 0;
         let used = 0;
@@ -614,81 +784,36 @@
           const i = idx[sym].get(ts);
           const a = bySym[sym].asset[i];
           const w = Number(WEIGHTS[sym] || 0);
-          if (Number.isFinite(a) && w > 0) {
-            total += w * a;
-            used += w;
-          }
+          if (Number.isFinite(a) && w > 0) { total += w * a; used += w; }
         }
+
         if (used <= 0) continue;
 
         const fgiRaw = clamp(total / (used + EPS));
-        rawOut.push({ t_sec: ts, fgi_raw: fgiRaw });
-      }
-      backfillSeriesRaw = rawOut;
-
-      // Smoothed series (EMA applied to raw)
-      const smoothOut = [];
-      let prev = 50.0;
-      for (const p of backfillSeriesRaw) {
-        const fgi = clamp(ALPHA_BACKFILL * p.fgi_raw + (1 - ALPHA_BACKFILL) * prev);
+        const fgi = clamp(ALPHA_BACKFILL * fgiRaw + (1 - ALPHA_BACKFILL) * prev);
         prev = fgi;
-        smoothOut.push({ t_sec: p.t_sec, fgi_raw: p.fgi_raw, fgi });
+        out.push({ t_sec: ts, fgi_raw: fgiRaw, fgi });
       }
-      backfillSeriesSmoothed = smoothOut;
 
-      // Seed live EMA from latest BACKFILL RAW (not smoothed) to reduce drift-to-50 from smoothing chains
-      // (Still smooth live display using BASKET_ALPHA_LIVE.)
-      if (backfillSeriesRaw.length) prevBasketLive = backfillSeriesRaw[backfillSeriesRaw.length - 1].fgi_raw;
+      backfillSeries = out;
 
-      // Render chart
-      renderChartFromMode();
-
-      el.textContent = `Backfill: rendered ${Math.min(24*60, backfillSeriesRaw.length)} pts (raw + optional smoothing).`;
-    }
-
-    function renderChartFromMode() {
-      const maxPts = 24 * 60;
-      const series = (chartMode === "smoothed") ? backfillSeriesSmoothed : backfillSeriesRaw;
-
-      const slice = series.slice(-maxPts);
-
+      // chart render
       chart.data.labels = [];
       chart.data.datasets[0].data = [];
+      const maxPts = 24 * 60;
+      const slice = backfillSeries.slice(-maxPts);
 
       for (const p of slice) {
         chart.data.labels.push(new Date(p.t_sec * 1000).toLocaleTimeString());
-        chart.data.datasets[0].data.push(chartMode === "smoothed" ? p.fgi : p.fgi_raw);
+        chart.data.datasets[0].data.push(p.fgi);
       }
 
       chart.update("none");
-      update24hStats();
-      setSeriesStatus();
-    }
+      update24hStatsFromChart();
 
-    function update24hStats() {
-      const maxPts = 24 * 60;
-      const series = (statsMode === "smoothed") ? backfillSeriesSmoothed : backfillSeriesRaw;
-      const slice = series.slice(-maxPts);
+      if (backfillSeries.length) prevBasketLive = backfillSeries[backfillSeries.length - 1].fgi;
 
-      if (!slice.length) {
-        document.getElementById("stats").textContent = "";
-        return;
-      }
-
-      let hi = -Infinity, lo = Infinity, sum = 0, n = 0;
-      for (const p of slice) {
-        const v = (statsMode === "smoothed") ? p.fgi : p.fgi_raw;
-        const x = Number(v);
-        if (!Number.isFinite(x)) continue;
-        if (x > hi) hi = x;
-        if (x < lo) lo = x;
-        sum += x; n++;
-      }
-      if (!n) return;
-      const avg = sum / n;
-
-      document.getElementById("stats").textContent =
-        `24h (${statsMode}) FGI: high=${hi.toFixed(2)}  low=${lo.toFixed(2)}  avg=${avg.toFixed(2)}  (points=${n})`;
+      el.textContent = `Backfill: rendered ${slice.length} points. Weights: ${weightsSummary()}`;
     }
 
     // ----------------------------
@@ -720,7 +845,6 @@
         try { msg = JSON.parse(ev.data); } catch { return; }
         const stream = msg.stream || "";
         const d = msg.data || {};
-
         const sym = stream.split("@")[0].toUpperCase();
         if (!liveStates[sym]) return;
 
@@ -770,10 +894,7 @@
         assets[sym] = sc;
 
         const w = Number(WEIGHTS[sym] || 0);
-        if (w > 0) {
-          total += w * sc.asset;
-          used += w;
-        }
+        if (w > 0) { total += w * sc.asset; used += w; }
       }
 
       if (used <= 0) return null;
@@ -792,78 +913,105 @@
 
       const dt = new Date(snap.t_sec * 1000);
       document.getElementById("meta").textContent =
-        `live raw=${fmt(snap.fgi_raw,2)} | ${dt.toLocaleString()} | alpha=${BASKET_ALPHA_LIVE} | weights: BTC=50% ETH=50%`;
+        `live raw=${fmt(snap.fgi_raw,2)} | ${dt.toLocaleString()} | alpha=${BASKET_ALPHA_LIVE} | weights: ${weightsSummary()}`;
     }
 
     function maybeAppendChartPoint(snap) {
-      // Append at minute boundaries only
       const minute = Math.floor(snap.t_sec / CHART_POINT_SECONDS);
       if (lastChartMinute === null) lastChartMinute = minute;
 
       if (minute !== lastChartMinute) {
         lastChartMinute = minute;
 
-        // Append live point to whichever chart mode is active (raw or smoothed)
-        const label = new Date(snap.t_sec * 1000).toLocaleTimeString();
+        chart.data.labels.push(new Date(snap.t_sec * 1000).toLocaleTimeString());
+        chart.data.datasets[0].data.push(snap.fgi);
 
-        chart.data.labels.push(label);
-        chart.data.datasets[0].data.push(chartMode === "smoothed" ? snap.fgi : snap.fgi_raw);
-
-        // Keep last 24h in chart (1440 points)
         const maxPts = 24 * 60;
         while (chart.data.labels.length > maxPts) {
           chart.data.labels.shift();
           chart.data.datasets[0].data.shift();
         }
-
         chart.update("none");
-
-        // Stats: recompute from backfill cache + current series mode
-        // (For simplicity we update stats from chart dataset, which is now mode-consistent.)
-        // If you want stats strictly from backfill-only, call update24hStats() instead.
-        update24hStats();
+        update24hStatsFromChart();
       }
     }
 
     // ----------------------------
-    // UI wiring (raw/smoothed toggles)
+    // Weights UI wiring
     // ----------------------------
-    function initSeriesUI() {
-      setSeriesStatus();
+    function initWeightsUI() {
+      const r0 = normalizeWeights(WEIGHTS);
+      if (r0.ok) WEIGHTS = r0.weights;
 
-      document.getElementById("btnShowRaw").onclick = () => {
-        chartMode = "raw";
-        renderChartFromMode();
-      };
-      document.getElementById("btnShowSmoothed").onclick = () => {
-        chartMode = "smoothed";
-        renderChartFromMode();
+      writeWeightsToUI(WEIGHTS);
+      setWeightStatus(`Current: ${weightsSummary()}`);
+
+      document.getElementById("btnNormalize").onclick = () => {
+        const raw = readWeightsFromUI();
+        const r = normalizeWeights(raw);
+        if (!r.ok) return setWeightStatus(r.msg, true);
+        writeWeightsToUI(r.weights);
+        setWeightStatus(`Normalized preview: ${SYMBOLS.map(s => `${s}=${(r.weights[s]*100).toFixed(1)}%`).join(" ")}`);
       };
 
-      document.getElementById("btnStatsRaw").onclick = () => {
-        statsMode = "raw";
-        update24hStats();
-        setSeriesStatus();
+      document.getElementById("btnApply").onclick = () => {
+        setWeightStatus("Applying…");
+        const raw = readWeightsFromUI();
+        const r = normalizeWeights(raw);
+        if (!r.ok) return setWeightStatus(r.msg, true);
+
+        WEIGHTS = r.weights;
+        writeWeightsToUI(WEIGHTS);
+
+        // recompute historic series and refresh chart immediately
+        recomputeBackfillFromCache();
+
+        // reset minute gating so chart doesn't “stutter” after apply
+        lastChartMinute = null;
+
+        setWeightStatus(`Applied: ${weightsSummary()}`);
       };
-      document.getElementById("btnStatsSmoothed").onclick = () => {
-        statsMode = "smoothed";
-        update24hStats();
-        setSeriesStatus();
-      };
+    }
+
+    // ----------------------------
+    // External refresh loop
+    // ----------------------------
+    async function refreshExternalFGIs() {
+      // Alternative.me
+      try {
+        const alt = await fetchAlternativeMeFGI();
+        renderExternalFGI("altFgi", "altMeta", "Alternative.me", alt);
+      } catch (e) {
+        renderExternalFGI("altFgi", "altMeta", "Alternative.me", { value: NaN, note: String(e.message || e) });
+      }
+
+      // CMC via proxy
+      const proxyUrl = (document.getElementById("cmcProxy").value || "").trim();
+      try {
+        const cmc = await fetchCMCFGIViaProxy(proxyUrl);
+        renderExternalFGI("cmcFgi", "cmcMeta", "CMC", cmc);
+      } catch (e) {
+        renderExternalFGI("cmcFgi", "cmcMeta", "CMC", { value: NaN, note: String(e.message || e) });
+      }
     }
 
     // ----------------------------
     // Boot
     // ----------------------------
     (async () => {
-      // lock UI weights (reflect fixed 50/50)
-      document.getElementById("w_BTCUSDT").value = "0.50";
-      document.getElementById("w_ETHUSDT").value = "0.50";
-
       initChart();
-      initSeriesUI();
+      initWeightsUI();
       setConn("disconnected");
 
+      // Start avg prices
+      await refreshAvgPrices();
+      setInterval(refreshAvgPrices, PRICE_AVG_REFRESH_MS);
+
+      // External FGIs
+      await refreshExternalFGIs();
+      setInterval(refreshExternalFGIs, EXTERNAL_FGI_REFRESH_MS);
+
+      // Backfill cache
       try {
         await loadBackfillCacheOnce();
       } catch (e) {
@@ -871,12 +1019,12 @@
           `Backfill failed: ${String(e.message || e)}`;
       }
 
+      // Live stream
       connectWS();
 
       setInterval(() => {
         const snap = computeLiveOnce();
         if (!snap) return;
-
         updateHeader(snap);
         updateTable(snap.assets);
         maybeAppendChartPoint(snap);
