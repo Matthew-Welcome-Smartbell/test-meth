@@ -33,6 +33,13 @@
     button { padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background: #f7f7f7; cursor: pointer; }
     button:hover { background: #efefef; }
     .err { color: #a40000; }
+
+    /* prediction boxes */
+    .predRow { display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; }
+    .predBox { flex:1 1 280px; border:1px solid #eee; border-radius:12px; padding:10px; }
+    .predTitle { font-size:12px; color:#666; margin-bottom:4px; }
+    .predVal { font-size:16px; font-weight:700; }
+    .predMeta { font-size:12px; color:#666; margin-top:4px; }
   </style>
 </head>
 <body>
@@ -74,6 +81,20 @@
         </div>
 
         <div id="priceStats" class="muted small" style="margin-top:10px;"></div>
+
+        <!-- RESTORED: Price prediction outputs -->
+        <div class="predRow">
+          <div class="predBox">
+            <div class="predTitle">Predicted BTC (tomorrow / 1 week) using FGI avg windows</div>
+            <div class="predVal" id="predBTC">--</div>
+            <div class="predMeta" id="predBTCMeta"></div>
+          </div>
+          <div class="predBox">
+            <div class="predTitle">Predicted ETH (tomorrow / 1 week) using FGI avg windows</div>
+            <div class="predVal" id="predETH">--</div>
+            <div class="predMeta" id="predETHMeta"></div>
+          </div>
+        </div>
 
         <div id="warnRed" class="warnBox warnRed" style="display:none;"></div>
         <div id="warnY1" class="warnBox warnYellow" style="display:none;"></div>
@@ -133,12 +154,13 @@
     // MyFGI weights (mutable via UI)
     let WEIGHTS = { "BTCUSDT": 0.50, "ETHUSDT": 0.50 };
 
+    // Average weights requested previously (CoinGlass/CMC removed in Option 1).
     // We renormalize using only available sources (my + alt).
-    const AVG_W_DESIRED = { my: 0.10, alt: 0.45 }; // sum=0.55; renormalize on available
+    const AVG_W_DESIRED = { my: 0.10, alt: 0.45 }; // sum=0.55; renormalize => my=0.1818 alt=0.8182
 
     const ALT_URL = "https://api.alternative.me/fng/?limit=500&format=json";
 
-    // For price averages + warnings (now BOTH BTC and ETH)
+    // For averages + warnings we check both BTC and ETH
     const PRICE_SYMBOLS = ["BTCUSDT", "ETHUSDT"];
 
     const LIVE_UPDATE_EVERY_MS = 5000;
@@ -147,6 +169,9 @@
     // Smoothing
     const BASKET_ALPHA_LIVE = 0.10;
     const ALPHA_BACKFILL = 0.10;
+
+    // RESTORED: K_MULT used only for predictions (same semantics as your python script)
+    const K_MULT = 18.0;
 
     // MyFGI params (seconds)
     const P = {
@@ -182,8 +207,13 @@
       return Math.max(lo, Math.min(hi, x));
     }
 
-    function tanhScoreSigned(x, k) { return clamp(50 + 50 * Math.tanh(x / (k + EPS))); }
-    function tanhScoreNegative(x, k) { return clamp(50 + 50 * Math.tanh((-x) / (k + EPS))); }
+    function tanhScoreSigned(x, k) {
+      return clamp(50 + 50 * Math.tanh(x / (k + EPS)));
+    }
+
+    function tanhScoreNegative(x, k) {
+      return clamp(50 + 50 * Math.tanh((-x) / (k + EPS)));
+    }
 
     function std(arr) {
       const n = arr.length;
@@ -261,6 +291,7 @@
     function update24hStatsFromChart(chart) {
       const data = chart?.data?.datasets?.[0]?.data || [];
       if (!data.length) return { hi: null, lo: null, avg: null, n: 0 };
+
       let hi = -Infinity, lo = Infinity, sum = 0, n = 0;
       for (const v of data) {
         const x = Number(v);
@@ -288,6 +319,7 @@
       if (startMs != null) url.searchParams.set("startTime", String(startMs));
       if (endMs != null) url.searchParams.set("endTime", String(endMs));
       url.searchParams.set("limit", String(limit));
+
       const res = await fetch(url.toString(), { method: "GET" });
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
@@ -296,16 +328,18 @@
       return await res.json();
     }
 
+    // Fetch last N minutes of 1m candles, paginated
     async function fetchLastNMinutes1m(symbol, minutes) {
       const now = Date.now();
       const start = now - minutes * 60 * 1000;
       const out = [];
 
+      // Binance max 1000 klines per request. Page forward.
       let cursor = start;
       const end = now;
       let guard = 0;
 
-      while (cursor < end && guard < 30) {
+      while (cursor < end && guard < 25) {
         guard++;
         const batch = await fetchKlines(symbol, "1m", cursor, end, 1000);
         if (!batch.length) break;
@@ -459,6 +493,7 @@
         this.curSell = 0;
 
         this._lastRetPrice = null;
+        this.lastPrice = null;
       }
 
       keepSec() {
@@ -476,7 +511,6 @@
 
       flushSecond(sec, price, buyQty, sellQty) {
         this.prices.push(sec, price);
-
         if (this._lastRetPrice != null && this._lastRetPrice > 0 && price > 0) {
           this.rets.push(sec, Math.log(price / (this._lastRetPrice + EPS)));
         }
@@ -489,6 +523,7 @@
       onAggTrade(eventMs, price, qty, isBuyerMaker) {
         const sec = Math.floor(eventMs / 1000);
         price = Number(price); qty = Number(qty);
+        this.lastPrice = price;
 
         if (this.curSec === null) {
           this.curSec = sec;
@@ -640,6 +675,7 @@
 
       backfillCache = { commonT, idx, bySym };
       el.textContent = `MyFGI backfill: cache ready (${commonT.length} minutes). Rendering MyFGI…`;
+
       recomputeMyFgiFromCache();
     }
 
@@ -648,6 +684,7 @@
       if (!backfillCache) { el.textContent = "MyFGI backfill: cache not ready."; return; }
 
       const { commonT, idx, bySym } = backfillCache;
+
       const out = [];
       let prev = 50.0;
 
@@ -699,65 +736,59 @@
         .map(([k,v]) => ({ day: k, avg: (v.n ? v.sum/v.n : NaN) }))
         .filter(x => Number.isFinite(x.avg))
         .sort((a,b)=> a.day.localeCompare(b.day));
+
       return days.slice(-3);
     }
 
     // ============================
     // PRICE AVERAGES (BTC + ETH)
     // ============================
-    let dailyCloses = {
-      BTCUSDT: null,
-      ETHUSDT: null,
-    };
-
-    // live prices from WS (optional; falls back to daily close)
-    let livePriceNow = {
-      BTCUSDT: null,
-      ETHUSDT: null,
-    };
+    let dailyCloses = { "BTCUSDT": null, "ETHUSDT": null }; // each: [{tSec, close}]
+    let lastTradePrice = { "BTCUSDT": null, "ETHUSDT": null };
 
     function avgLastNCloses(symbol, n) {
-      const arr0 = dailyCloses[symbol];
-      if (!arr0 || arr0.length < n) return null;
-      const arr = arr0.slice(-n).map(x => x.close).filter(v => Number.isFinite(v));
+      const s = dailyCloses[symbol];
+      if (!s || s.length < n) return null;
+      const arr = s.slice(-n).map(x => x.close).filter(v => Number.isFinite(v));
       if (arr.length < n) return null;
-      return arr.reduce((a,b)=>a+b,0) / arr.length;
+      const sum = arr.reduce((a,b)=>a+b,0);
+      return sum / arr.length;
     }
 
     async function loadDailyClosesAll() {
-      // buffer to ensure 90d exists
-      dailyCloses["BTCUSDT"] = await fetchDailyCloses("BTCUSDT", 120);
-      dailyCloses["ETHUSDT"] = await fetchDailyCloses("ETHUSDT", 120);
+      // fetch enough for 90 days + buffer
+      for (const sym of PRICE_SYMBOLS) {
+        dailyCloses[sym] = await fetchDailyCloses(sym, 120);
+      }
     }
 
-    function priceNowFor(symbol) {
-      if (Number.isFinite(livePriceNow[symbol])) return livePriceNow[symbol];
-      const dc = dailyCloses[symbol];
-      if (dc && dc.length) return dc[dc.length - 1].close;
-      return null;
+    function getPriceNow(symbol) {
+      return (lastTradePrice[symbol] != null)
+        ? lastTradePrice[symbol]
+        : (dailyCloses[symbol]?.length ? dailyCloses[symbol][dailyCloses[symbol].length-1].close : null);
     }
 
     function updatePriceStatsUI() {
-      const packs = {};
-      for (const sym of PRICE_SYMBOLS) {
-        packs[sym] = {
-          p: priceNowFor(sym),
-          a7:  avgLastNCloses(sym, 7),
-          a30: avgLastNCloses(sym, 30),
-          a60: avgLastNCloses(sym, 60),
-          a90: avgLastNCloses(sym, 90),
-        };
-      }
-
-      const btc = packs["BTCUSDT"];
-      const eth = packs["ETHUSDT"];
+      const btc = {
+        p: getPriceNow("BTCUSDT"),
+        a7: avgLastNCloses("BTCUSDT", 7),
+        a30: avgLastNCloses("BTCUSDT", 30),
+        a60: avgLastNCloses("BTCUSDT", 60),
+        a90: avgLastNCloses("BTCUSDT", 90),
+      };
+      const eth = {
+        p: getPriceNow("ETHUSDT"),
+        a7: avgLastNCloses("ETHUSDT", 7),
+        a30: avgLastNCloses("ETHUSDT", 30),
+        a60: avgLastNCloses("ETHUSDT", 60),
+        a90: avgLastNCloses("ETHUSDT", 90),
+      };
 
       document.getElementById("priceStats").textContent =
-        `BTC price=${fmt(btc?.p,2)} | 7d avg=${fmt(btc?.a7,2)} | 30d avg=${fmt(btc?.a30,2)} | 60d avg=${fmt(btc?.a60,2)} | 90d avg=${fmt(btc?.a90,2)}`
-        + "   ||   "
-        + `ETH price=${fmt(eth?.p,2)} | 7d avg=${fmt(eth?.a7,2)} | 30d avg=${fmt(eth?.a30,2)} | 60d avg=${fmt(eth?.a60,2)} | 90d avg=${fmt(eth?.a90,2)}`;
+        `BTC price=${fmt(btc.p,2)} | 7d avg=${fmt(btc.a7,2)} | 30d avg=${fmt(btc.a30,2)} | 60d avg=${fmt(btc.a60,2)} | 90d avg=${fmt(btc.a90,2)}   ||   ` +
+        `ETH price=${fmt(eth.p,2)} | 7d avg=${fmt(eth.a7,2)} | 30d avg=${fmt(eth.a30,2)} | 60d avg=${fmt(eth.a60,2)} | 90d avg=${fmt(eth.a90,2)}`;
 
-      return packs;
+      return { btc, eth };
     }
 
     // ============================
@@ -791,46 +822,194 @@
       el.textContent = msg;
     }
 
-    function evaluateWarnings(avgFgiNow, pricePacks, avgFgiDailyLast3) {
-      // RED: now checks BTC and ETH individually
-      // You requested: 30/60 both use 5% AND add 90d with same 5%
-      const redLines = [];
-      const fgiBad = (Number.isFinite(avgFgiNow) && avgFgiNow < 40);
+    function evaluateWarnings(avgFgiNow, pricePack, avgFgiDailyLast3) {
+      const btc = pricePack.btc;
+      const eth = pricePack.eth;
 
-      function checkOne(symLabel, pack) {
-        const p = pack?.p;
-        const a30 = pack?.a30;
-        const a60 = pack?.a60;
-        const a90 = pack?.a90;
+      const parts = [];
 
-        if (!fgiBad) return;
+      function addRedFor(symbolName, p, a30, a60, a90) {
+        const cond30 = (Number.isFinite(p) && Number.isFinite(a30) && p > a30 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
+        const cond60 = (Number.isFinite(p) && Number.isFinite(a60) && p > a60 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
+        const cond90 = (Number.isFinite(p) && Number.isFinite(a90) && p > a90 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
 
-        if (Number.isFinite(p) && Number.isFinite(a30) && p > a30 * 1.05) {
-          redLines.push(`${symLabel}: price > 30d avg * 1.05 AND avg FGI < 40`);
-        }
-        if (Number.isFinite(p) && Number.isFinite(a60) && p > a60 * 1.05) {
-          redLines.push(`${symLabel}: price > 60d avg * 1.05 AND avg FGI < 40`);
-        }
-        if (Number.isFinite(p) && Number.isFinite(a90) && p > a90 * 1.05) {
-          redLines.push(`${symLabel}: price > 90d avg * 1.05 AND avg FGI < 40`);
-        }
+        if (cond30) parts.push(`${symbolName}: price > 30d avg * 1.05 AND avg FGI < 40`);
+        if (cond60) parts.push(`${symbolName}: price > 60d avg * 1.05 AND avg FGI < 40`);
+        if (cond90) parts.push(`${symbolName}: price > 90d avg * 1.05 AND avg FGI < 40`);
       }
 
-      checkOne("BTC", pricePacks["BTCUSDT"]);
-      checkOne("ETH", pricePacks["ETHUSDT"]);
+      addRedFor("BTC", btc.p, btc.a30, btc.a60, btc.a90);
+      addRedFor("ETH", eth.p, eth.a30, eth.a60, eth.a90);
 
-      setWarn("warnRed", redLines.length > 0, redLines.length ? `RED WARNING:\n- ${redLines.join("\n- ")}` : "");
+      setWarn("warnRed", parts.length > 0, parts.length ? `RED WARNING: ${parts.join(" | ")}` : "");
 
-      // YELLOW #1
       const y1 = (Number.isFinite(avgFgiNow) && avgFgiNow > 50);
       setWarn("warnY1", y1, y1 ? "WARNING: average FGI > 50, use reduced leverage" : "");
 
-      // YELLOW #2: avg FGI < 37 for 3+ days
       let y2 = false;
       if (avgFgiDailyLast3 && avgFgiDailyLast3.length >= 3) {
         y2 = avgFgiDailyLast3.slice(-3).every(x => Number.isFinite(x.avg) && x.avg < 37);
       }
       setWarn("warnY2", y2, y2 ? "WARNING: FGI < 37 for 3 or more days, possible drawdown, use reduced leverage" : "");
+    }
+
+    // ============================
+    // RESTORED: PRICE PREDICTIONS (k_fit * K_MULT) USING AVG FGI 2D/7D
+    // ============================
+    function centeredFgi(v) {
+      return Number.isFinite(v) ? (Number(v) - 50.0) : NaN;
+    }
+
+    function mean(arr) {
+      const xs = arr.filter(x => Number.isFinite(x));
+      if (!xs.length) return NaN;
+      return xs.reduce((a,b)=>a+b,0) / xs.length;
+    }
+
+    // Fit k (no intercept) for dP ≈ k*(FGI-50)*dt over daily history
+    function fitKLeastSquares(priceSeries, fgiSeries) {
+      // priceSeries: [{tSec, close}] daily close
+      // fgiSeries: Map dayKey -> fgi (0..100) (we'll align using dayKeyUTC)
+      // dt = 1 day
+      if (!priceSeries || priceSeries.length < 10) return NaN;
+
+      let prev = null;
+      const x = [];
+      const y = [];
+
+      for (const row of priceSeries) {
+        const day = dayKeyUTC(row.tSec);
+        const fgi = fgiSeries.get(day);
+        if (!Number.isFinite(fgi)) { prev = row.close; continue; }
+        if (prev == null || !Number.isFinite(prev) || !Number.isFinite(row.close)) { prev = row.close; continue; }
+
+        const dP = row.close - prev;
+        const fc = centeredFgi(fgi); // (FGI-50)
+        x.push(fc);
+        y.push(dP);
+
+        prev = row.close;
+      }
+
+      if (x.length < 10) return NaN;
+
+      let denom = 0, numer = 0;
+      for (let i=0; i<x.length; i++) {
+        denom += x[i]*x[i];
+        numer += x[i]*y[i];
+      }
+      if (denom <= 0) return NaN;
+      return numer / denom;
+    }
+
+    // Build daily AvgFGI series (dayKey -> avgFgi) using available sources:
+    // - Alternative.me provides daily points
+    // - MyFGI provides minute points; we average by UTC day
+    function buildDailyAvgFgiSeries(myFgiSeriesMinutes, altHistoryDaily) {
+      // myFgiSeriesMinutes: [{t_sec,fgi}] 72h
+      // altHistoryDaily: [{tSec,value}] (daily-ish)
+      const myByDay = new Map();
+      for (const p of (myFgiSeriesMinutes || [])) {
+        const day = dayKeyUTC(p.t_sec);
+        const o = myByDay.get(day) || { sum:0, n:0 };
+        if (Number.isFinite(p.fgi)) { o.sum += p.fgi; o.n += 1; }
+        myByDay.set(day, o);
+      }
+      const myAvg = new Map();
+      for (const [day, o] of myByDay.entries()) {
+        if (o.n) myAvg.set(day, o.sum/o.n);
+      }
+
+      const altMap = new Map();
+      for (const a of (altHistoryDaily || [])) {
+        const day = dayKeyUTC(a.tSec);
+        if (Number.isFinite(a.value)) altMap.set(day, clamp(a.value));
+      }
+
+      // union days
+      const days = new Set([...myAvg.keys(), ...altMap.keys()]);
+      const out = new Map();
+      for (const day of days) {
+        const my = myAvg.has(day) ? myAvg.get(day) : NaN;
+        const alt = altMap.has(day) ? altMap.get(day) : NaN;
+        const r = computeAvgFgi(my, alt);
+        if (Number.isFinite(r.avg)) out.set(day, r.avg);
+      }
+      return out; // Map dayKey -> avgFgi
+    }
+
+    function computePredictions(avgFgiDailyMap, symbol) {
+      // Uses daily closes and k-fit for THIS symbol.
+      const closes = dailyCloses[symbol];
+      if (!closes || closes.length < 30 || !avgFgiDailyMap) {
+        return { ok:false, msg:"insufficient data" };
+      }
+
+      const k_fit = fitKLeastSquares(closes, avgFgiDailyMap);
+      const k_used = (Number.isFinite(k_fit) ? k_fit : 0) * Number(K_MULT);
+
+      // Take latest available daily avg FGI values for 2d and 7d means.
+      // We compute means on the last N days that exist in both series.
+      const daysSorted = Array.from(avgFgiDailyMap.keys()).sort();
+      if (!daysSorted.length) return { ok:false, msg:"no daily avg fgi" };
+
+      const lastDays = daysSorted.slice(-14); // plenty for 7
+      const vals = lastDays.map(d => avgFgiDailyMap.get(d));
+
+      const fgi2 = mean(vals.slice(-2));
+      const fgi7 = mean(vals.slice(-7));
+
+      const p0 = getPriceNow(symbol);
+      if (!Number.isFinite(p0)) return { ok:false, msg:"no current price" };
+
+      // Model: dP ≈ k * (FGI-50) * dt
+      // Tomorrow: dt=1 with fgi2 or fgi7
+      // Week: dt=7 with fgi2 or fgi7 (assuming constant)
+      const fc2 = centeredFgi(fgi2);
+      const fc7 = centeredFgi(fgi7);
+
+      const p_tom_2 = p0 + k_used * fc2 * 1.0;
+      const p_tom_7 = p0 + k_used * fc7 * 1.0;
+      const p_wk_2  = p0 + k_used * fc2 * 7.0;
+      const p_wk_7  = p0 + k_used * fc7 * 7.0;
+
+      return {
+        ok: true,
+        k_fit,
+        k_used,
+        fgi2,
+        fgi7,
+        p0,
+        p_tom_2, p_tom_7,
+        p_wk_2,  p_wk_7,
+      };
+    }
+
+    function updatePredictionsUI(avgFgiDailyMap) {
+      const btc = computePredictions(avgFgiDailyMap, "BTCUSDT");
+      const eth = computePredictions(avgFgiDailyMap, "ETHUSDT");
+
+      if (btc.ok) {
+        document.getElementById("predBTC").textContent =
+          `Tomorrow: (2d FGI) ${fmt(btc.p_tom_2,2)} | (7d FGI) ${fmt(btc.p_tom_7,2)}   ||   ` +
+          `1 week: (2d FGI) ${fmt(btc.p_wk_2,2)} | (7d FGI) ${fmt(btc.p_wk_7,2)}`;
+        document.getElementById("predBTCMeta").textContent =
+          `BTC p0=${fmt(btc.p0,2)} | FGI2=${fmt(btc.fgi2,2)} FGI7=${fmt(btc.fgi7,2)} | k_fit=${fmt(btc.k_fit,6)} | K_MULT=${K_MULT} | k_used=${fmt(btc.k_used,6)}`;
+      } else {
+        document.getElementById("predBTC").textContent = "--";
+        document.getElementById("predBTCMeta").textContent = `BTC prediction unavailable: ${btc.msg || "unknown"}`;
+      }
+
+      if (eth.ok) {
+        document.getElementById("predETH").textContent =
+          `Tomorrow: (2d FGI) ${fmt(eth.p_tom_2,2)} | (7d FGI) ${fmt(eth.p_tom_7,2)}   ||   ` +
+          `1 week: (2d FGI) ${fmt(eth.p_wk_2,2)} | (7d FGI) ${fmt(eth.p_wk_7,2)}`;
+        document.getElementById("predETHMeta").textContent =
+          `ETH p0=${fmt(eth.p0,2)} | FGI2=${fmt(eth.fgi2,2)} FGI7=${fmt(eth.fgi7,2)} | k_fit=${fmt(eth.k_fit,6)} | K_MULT=${K_MULT} | k_used=${fmt(eth.k_used,6)}`;
+      } else {
+        document.getElementById("predETH").textContent = "--";
+        document.getElementById("predETHMeta").textContent = `ETH prediction unavailable: ${eth.msg || "unknown"}`;
+      }
     }
 
     // ============================
@@ -868,8 +1047,7 @@
 
         if (stream.endsWith("@aggTrade")) {
           liveStates[sym].onAggTrade(Number(d.E), Number(d.p), Number(d.q), Boolean(d.m));
-          // capture live prices for BTC + ETH
-          if (sym === "BTCUSDT" || sym === "ETHUSDT") livePriceNow[sym] = Number(d.p);
+          if (sym === "BTCUSDT" || sym === "ETHUSDT") lastTradePrice[sym] = Number(d.p);
           return;
         }
         if (stream.includes("@depth10")) {
@@ -992,6 +1170,7 @@
         WEIGHTS = r.weights;
         writeWeightsToUI(WEIGHTS);
 
+        // Recompute MyFGI backfill + reseed live EMA to avoid a jump
         recomputeMyFgiFromCache();
         lastChartMinute = null;
 
@@ -1010,7 +1189,7 @@
       try {
         await loadDailyClosesAll();
       } catch (e) {
-        document.getElementById("priceStats").textContent = `Daily closes load failed: ${String(e.message || e)}`;
+        document.getElementById("priceStats").textContent = `Daily close load failed: ${String(e.message || e)}`;
       }
 
       try {
@@ -1036,6 +1215,7 @@
         const mySnap = computeMyFgiLiveOnce();
         if (!mySnap) return;
 
+        // Update MyFGI tile
         setTile(
           "myFgi",
           "myMeta",
@@ -1043,14 +1223,17 @@
           `raw=${fmt(mySnap.fgi_raw,2)} | alpha=${BASKET_ALPHA_LIVE} | weights: ${weightsSummary()} | ${new Date(mySnap.t_sec*1000).toLocaleString()}`
         );
 
+        // Update Alt tile
         setTile("altFgi", "altMeta", altNow, altNowMeta);
 
+        // Compute AVG (renormalized on available sources)
         const { avg, meta } = computeAvgFgi(mySnap.fgi, altNow);
         setTile("avgFgi", "avgMeta", avg, meta);
 
-        // BTC+ETH averages line
-        const packs = updatePriceStatsUI();
+        // Update price stats + warnings
+        const pricePack = updatePriceStatsUI();
 
+        // Daily series for 3+ days check
         const myDaily = computeMyFgiDailyAveragesLast3Days();
         const altDaily = computeAltDailyLast3();
 
@@ -1062,16 +1245,24 @@
           byDay.set(x.day, o);
         }
         const dailyMerged = Array.from(byDay.values()).sort((a,b)=>a.day.localeCompare(b.day));
+
         const avgDaily = dailyMerged.map(d => {
           const r = computeAvgFgi(d.my, d.alt);
           return { day: d.day, avg: r.avg };
         }).filter(x => Number.isFinite(x.avg));
 
-        // warnings now: BTC+ETH and includes 30/60/90 all at 5%
-        evaluateWarnings(avg, packs, avgDaily);
+        evaluateWarnings(avg, pricePack, avgDaily);
 
+        // RESTORED: predictions (uses daily closes + daily avg fgi series)
+        const avgFgiDailyMap = buildDailyAvgFgiSeries(myFgiSeries, altHistory);
+        updatePredictionsUI(avgFgiDailyMap);
+
+        // Update per-asset table
         updateTable(mySnap.assets);
+
+        // Update chart
         maybeAppendChartPoint(mySnap);
+
       }, LIVE_UPDATE_EVERY_MS);
     })();
   </script>
