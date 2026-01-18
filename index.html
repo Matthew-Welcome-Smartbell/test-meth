@@ -25,6 +25,17 @@
     .kpiLabel { font-size: 12px; color:#666; }
     .kpiBox { border: 1px solid #eee; border-radius: 12px; padding: 10px; }
     .kpiTop { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+    .bigWarning {
+      margin-top: 10px;
+      padding: 12px;
+      border-radius: 12px;
+      border: 2px solid #a40000;
+      background: #fff0f0;
+      color: #a40000;
+      font-weight: 800;
+      font-size: 18px;
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -68,6 +79,14 @@
       </div>
     </div>
 
+    <!-- NEW: composite + warnings -->
+    <div style="margin-top:12px;">
+      <div class="muted">Composite FGI (avg of Your/Alt/CMC when available)</div>
+      <div id="avgFgi" class="big">--</div>
+      <div id="avgMeta" class="muted small"></div>
+      <div id="bigWarning" class="bigWarning"></div>
+    </div>
+
     <!-- Avg prices -->
     <div style="margin-top:12px;">
       <div class="muted">Average prices (simple mean of daily closes)</div>
@@ -90,7 +109,7 @@
     <canvas id="chart"></canvas>
   </div>
 
-  <!-- Weights UI (moved under graph) -->
+  <!-- Weights UI (under graph) -->
   <div class="card">
     <div class="muted">Basket weights (BTC/ETH only; auto-normalized to sum to 1)</div>
 
@@ -141,21 +160,23 @@
     // Config
     // ----------------------------
     const SYMBOLS = ["BTCUSDT", "ETHUSDT"];
-
-    // Runtime weights (BTC/ETH only) - default 50/50
     let WEIGHTS = { "BTCUSDT": 0.50, "ETHUSDT": 0.50 };
 
-    // Update cadences
-    const LIVE_UPDATE_EVERY_MS = 5000;          // your FGI display cadence
-    const CHART_POINT_SECONDS = 60;             // chart 1 point / minute
-    const EXTERNAL_FGI_REFRESH_MS = 60_000;     // external FGI refresh
-    const PRICE_AVG_REFRESH_MS = 30 * 60_000;   // refresh avg prices every 30 minutes
+    const LIVE_UPDATE_EVERY_MS = 5000;
+    const CHART_POINT_SECONDS = 60;
+    const EXTERNAL_FGI_REFRESH_MS = 60_000;
+    const PRICE_AVG_REFRESH_MS = 30 * 60_000;
 
-    // EMA smoothing for displayed series
     const BASKET_ALPHA_LIVE = 0.10;
-    const ALPHA_BACKFILL = 0.10; // keep consistent with live to avoid mismatch
+    const ALPHA_BACKFILL = 0.10;
 
-    // FGI core parameters (seconds)
+    // Warning thresholds (as requested)
+    const WARN = {
+      fgiLow: 40,
+      over60d: 1.05,  // price > 60D avg * 1.05
+      over30d: 1.10,  // price > 30D avg * 1.10
+    };
+
     const P = {
       mom_short_s: 120,
       mom_long_s: 3600,
@@ -181,6 +202,20 @@
     const EPS = 1e-12;
 
     // ----------------------------
+    // Runtime state for external FGIs + price averages
+    // ----------------------------
+    const state = {
+      yourFgi: { value: NaN, t_sec: null },
+      altFgi:  { value: NaN, t_sec: null },
+      cmcFgi:  { value: NaN, t_sec: null },
+
+      avgPrices: {
+        BTCUSDT: { d7: NaN, d30: NaN, d60: NaN, d90: NaN, lastClose: NaN },
+        ETHUSDT: { d7: NaN, d30: NaN, d60: NaN, d90: NaN, lastClose: NaN },
+      }
+    };
+
+    // ----------------------------
     // Helpers
     // ----------------------------
     function clamp(x, lo=0, hi=100) {
@@ -189,13 +224,8 @@
       return Math.max(lo, Math.min(hi, x));
     }
 
-    function tanhScoreSigned(x, k) {
-      return clamp(50 + 50 * Math.tanh(x / (k + EPS)));
-    }
-
-    function tanhScoreNegative(x, k) {
-      return clamp(50 + 50 * Math.tanh((-x) / (k + EPS)));
-    }
+    function tanhScoreSigned(x, k) { return clamp(50 + 50 * Math.tanh(x / (k + EPS))); }
+    function tanhScoreNegative(x, k){ return clamp(50 + 50 * Math.tanh((-x) / (k + EPS))); }
 
     function std(arr) {
       const n = arr.length;
@@ -206,6 +236,13 @@
       let ss = 0;
       for (const v of arr) { const d = v - mean; ss += d*d; }
       return Math.sqrt(ss / n);
+    }
+
+    function mean(arr) {
+      if (!arr.length) return NaN;
+      let s = 0;
+      for (const x of arr) s += x;
+      return s / arr.length;
     }
 
     function fmt(x, d=2) {
@@ -230,23 +267,18 @@
     function update24hStatsFromChart() {
       if (!chart) return;
       const data = chart.data.datasets[0].data || [];
-      if (!data.length) {
-        document.getElementById("stats").textContent = "";
-        return;
-      }
+      if (!data.length) { document.getElementById("stats").textContent = ""; return; }
       let hi = -Infinity, lo = Infinity, sum = 0, n = 0;
       for (const v of data) {
         const x = Number(v);
         if (!Number.isFinite(x)) continue;
         if (x > hi) hi = x;
         if (x < lo) lo = x;
-        sum += x;
-        n++;
+        sum += x; n++;
       }
       if (!n) return;
-      const avg = sum / n;
       document.getElementById("stats").textContent =
-        `24h FGI: high=${hi.toFixed(2)}  low=${lo.toFixed(2)}  avg=${avg.toFixed(2)}  (points=${n})`;
+        `24h FGI: high=${hi.toFixed(2)}  low=${lo.toFixed(2)}  avg=${(sum/n).toFixed(2)}  (points=${n})`;
     }
 
     function normalizeWeights(obj) {
@@ -285,10 +317,84 @@
     }
 
     // ----------------------------
-    // External FGIs (Alternative.me + CMC via optional proxy)
+    // Composite FGI + big warning logic (NEW)
+    // ----------------------------
+    function computeCompositeFGI() {
+      const vals = [];
+      if (Number.isFinite(state.yourFgi.value)) vals.push(state.yourFgi.value);
+      if (Number.isFinite(state.altFgi.value)) vals.push(state.altFgi.value);
+      if (Number.isFinite(state.cmcFgi.value)) vals.push(state.cmcFgi.value);
+      if (!vals.length) return { value: NaN, n: 0 };
+      const v = vals.reduce((a,b)=>a+b,0) / vals.length;
+      return { value: v, n: vals.length };
+    }
+
+    function renderCompositeAndWarning() {
+      const avg = computeCompositeFGI();
+      const avgEl = document.getElementById("avgFgi");
+      const avgMeta = document.getElementById("avgMeta");
+      const warnEl = document.getElementById("bigWarning");
+
+      if (!Number.isFinite(avg.value)) {
+        avgEl.textContent = "--";
+        avgEl.style.color = "black";
+        avgMeta.textContent = "Waiting for FGI sources…";
+        warnEl.style.display = "none";
+        warnEl.textContent = "";
+        return;
+      }
+
+      avgEl.textContent = fmt(avg.value, 2);
+      avgEl.style.color = colorForFGI(avg.value);
+      avgMeta.textContent = `Averaging ${avg.n} sources (Your/Alt/CMC when available)`;
+
+      // Basket price approximation: weight-average of latest daily closes (or fallback to 30D if needed)
+      const btc = state.avgPrices.BTCUSDT;
+      const eth = state.avgPrices.ETHUSDT;
+
+      const haveBtc = Number.isFinite(btc.lastClose);
+      const haveEth = Number.isFinite(eth.lastClose);
+
+      // if lastClose isn't available yet, no warning
+      if (!(haveBtc && haveEth)) {
+        warnEl.style.display = "none";
+        warnEl.textContent = "";
+        return;
+      }
+
+      const basketPrice = WEIGHTS.BTCUSDT * btc.lastClose + WEIGHTS.ETHUSDT * eth.lastClose;
+
+      const basketAvg30 = WEIGHTS.BTCUSDT * btc.d30 + WEIGHTS.ETHUSDT * eth.d30;
+      const basketAvg60 = WEIGHTS.BTCUSDT * btc.d60 + WEIGHTS.ETHUSDT * eth.d60;
+
+      const fgi = avg.value;
+
+      // Conditions requested:
+      // 1) price > 60day avg * 1.05 and fgi < 40
+      // 2) price > 30day avg * 1.1 and fgi < 40
+      const cond1 = Number.isFinite(basketAvg60) && (basketPrice > basketAvg60 * WARN.over60d) && (fgi < WARN.fgiLow);
+      const cond2 = Number.isFinite(basketAvg30) && (basketPrice > basketAvg30 * WARN.over30d) && (fgi < WARN.fgiLow);
+
+      if (cond1 || cond2) {
+        const lines = [];
+        if (cond1) lines.push(`WARNING: Price is > ${((WARN.over60d-1)*100).toFixed(0)}% above 60D avg while FGI < ${WARN.fgiLow}.`);
+        if (cond2) lines.push(`WARNING: Price is > ${((WARN.over30d-1)*100).toFixed(0)}% above 30D avg while FGI < ${WARN.fgiLow}.`);
+
+        const details =
+          ` BasketPrice=${fmt(basketPrice,2)} | 30D=${fmt(basketAvg30,2)} | 60D=${fmt(basketAvg60,2)} | CompositeFGI=${fmt(fgi,2)}`;
+
+        warnEl.textContent = lines.join(" ") + details;
+        warnEl.style.display = "block";
+      } else {
+        warnEl.style.display = "none";
+        warnEl.textContent = "";
+      }
+    }
+
+    // ----------------------------
+    // External FGIs
     // ----------------------------
     async function fetchAlternativeMeFGI() {
-      // Public endpoint
       const url = "https://api.alternative.me/fng/?limit=1&format=json";
       const res = await fetch(url, { method: "GET" });
       if (!res.ok) throw new Error(`Alternative.me fetch failed: ${res.status}`);
@@ -296,22 +402,16 @@
       const row = j?.data?.[0];
       const value = row ? Number(row.value) : NaN;
       const classification = row?.value_classification || "";
-      const ts = row?.timestamp ? Number(row.timestamp) : null; // seconds
+      const ts = row?.timestamp ? Number(row.timestamp) : null;
       return { value, classification, t_sec: ts };
     }
 
-    // CMC requires API key; do NOT call directly from browser.
-    // Provide a proxy endpoint YOU host that injects the key server-side.
-    // Expected proxy response formats supported:
-    //  A) { value: 73, classification: "...", updatedAt: "..." }
-    //  B) Raw CMC Pro response: { data: [{ value: 73, value_classification: "...", timestamp: ... }] }
     async function fetchCMCFGIViaProxy(proxyUrl) {
       if (!proxyUrl) return { value: NaN, note: "N/A (no proxy configured)" };
       const res = await fetch(proxyUrl, { method: "GET" });
       if (!res.ok) throw new Error(`CMC proxy fetch failed: ${res.status}`);
       const j = await res.json();
 
-      // Format A
       if (j && Number.isFinite(Number(j.value))) {
         return {
           value: Number(j.value),
@@ -321,7 +421,6 @@
         };
       }
 
-      // Format B
       const row = j?.data?.[0];
       if (row && Number.isFinite(Number(row.value))) {
         return {
@@ -335,14 +434,14 @@
       return { value: NaN, note: "Unrecognized proxy response" };
     }
 
-    function renderExternalFGI(idValue, idMeta, label, obj) {
+    function renderExternalFGI(idValue, idMeta, obj) {
       const el = document.getElementById(idValue);
       const meta = document.getElementById(idMeta);
 
       if (!Number.isFinite(obj.value)) {
         el.textContent = "--";
         el.style.color = "black";
-        meta.textContent = obj.note ? obj.note : `${label}: unavailable`;
+        meta.textContent = obj.note ? obj.note : "Unavailable";
         return;
       }
 
@@ -354,8 +453,32 @@
       meta.textContent = `${when}${cls}`;
     }
 
+    async function refreshExternalFGIs() {
+      try {
+        const alt = await fetchAlternativeMeFGI();
+        state.altFgi = { value: alt.value, t_sec: alt.t_sec };
+        renderExternalFGI("altFgi", "altMeta", alt);
+      } catch (e) {
+        state.altFgi = { value: NaN, t_sec: null };
+        renderExternalFGI("altFgi", "altMeta", { value: NaN, note: String(e.message || e) });
+      }
+
+      const proxyUrl = (document.getElementById("cmcProxy").value || "").trim();
+      try {
+        const cmc = await fetchCMCFGIViaProxy(proxyUrl);
+        state.cmcFgi = { value: cmc.value, t_sec: cmc.t_sec || null };
+        renderExternalFGI("cmcFgi", "cmcMeta", cmc);
+      } catch (e) {
+        state.cmcFgi = { value: NaN, t_sec: null };
+        renderExternalFGI("cmcFgi", "cmcMeta", { value: NaN, note: String(e.message || e) });
+      }
+
+      // after external updates, recompute composite + warning
+      renderCompositeAndWarning();
+    }
+
     // ----------------------------
-    // Binance REST for backfill + avg prices
+    // Binance REST for avg prices + backfill
     // ----------------------------
     async function fetchKlines(symbol, interval, startMs, endMs, limit=1000) {
       const url = new URL("https://api.binance.com/api/v3/klines");
@@ -370,19 +493,16 @@
         const txt = await res.text().catch(() => "");
         throw new Error(`Klines fetch failed ${res.status}: ${txt}`);
       }
-      return await res.json(); // array-of-arrays
+      return await res.json();
     }
 
     async function fetchLast24h1m(symbol) {
       const now = Date.now();
       const start = now - 24 * 3600 * 1000;
-
-      // Need up to 1440 points; Binance limit is 1000 => two chunks.
       const mid = start + 1000 * 60 * 1000;
       const part1 = await fetchKlines(symbol, "1m", start, mid, 1000);
       const part2 = await fetchKlines(symbol, "1m", mid, now, 1000);
 
-      // merge + de-dup by openTime
       const map = new Map();
       for (const k of [...part1, ...part2]) map.set(k[0], k);
       const merged = Array.from(map.entries()).sort((a,b)=>a[0]-b[0]).map(e=>e[1]);
@@ -390,18 +510,9 @@
     }
 
     async function fetchDailyCloses(symbol, days=90) {
-      // /api/v3/klines supports limit up to 1000; use 1d interval and limit=days
       const kl = await fetchKlines(symbol, "1d", null, null, days);
-      // kline: [0 openTime, 4 close, ...]
       const closes = kl.map(k => Number(k[4])).filter(x => Number.isFinite(x));
       return closes;
-    }
-
-    function mean(arr) {
-      if (!arr.length) return NaN;
-      let s = 0;
-      for (const x of arr) s += x;
-      return s / arr.length;
     }
 
     async function refreshAvgPrices() {
@@ -411,22 +522,34 @@
           fetchDailyCloses("ETHUSDT", 90),
         ]);
 
-        const btc7 = mean(btc.slice(-7));
-        const btc30 = mean(btc.slice(-30));
-        const btc90 = mean(btc.slice(-90));
+        function calc(closes) {
+          return {
+            d7:  mean(closes.slice(-7)),
+            d30: mean(closes.slice(-30)),
+            d60: mean(closes.slice(-60)),
+            d90: mean(closes.slice(-90)),
+            lastClose: closes.length ? closes[closes.length - 1] : NaN,
+          };
+        }
 
-        const eth7 = mean(eth.slice(-7));
-        const eth30 = mean(eth.slice(-30));
-        const eth90 = mean(eth.slice(-90));
+        state.avgPrices.BTCUSDT = calc(btc);
+        state.avgPrices.ETHUSDT = calc(eth);
+
+        const b = state.avgPrices.BTCUSDT;
+        const e = state.avgPrices.ETHUSDT;
 
         document.getElementById("avgBTC").textContent =
-          `1W=${fmt(btc7,0)}  | 30D=${fmt(btc30,0)}  | 90D=${fmt(btc90,0)}`;
+          `1W=${fmt(b.d7,0)}  | 30D=${fmt(b.d30,0)}  | 60D=${fmt(b.d60,0)}  | 90D=${fmt(b.d90,0)}  | last=${fmt(b.lastClose,0)}`;
         document.getElementById("avgETH").textContent =
-          `1W=${fmt(eth7,0)}  | 30D=${fmt(eth30,0)}  | 90D=${fmt(eth90,0)}`;
+          `1W=${fmt(e.d7,0)}  | 30D=${fmt(e.d30,0)}  | 60D=${fmt(e.d60,0)}  | 90D=${fmt(e.d90,0)}  | last=${fmt(e.lastClose,0)}`;
+
       } catch (e) {
         document.getElementById("avgBTC").textContent = `Avg price fetch failed: ${String(e.message || e)}`;
         document.getElementById("avgETH").textContent = `Avg price fetch failed: ${String(e.message || e)}`;
       }
+
+      // refresh composite warning after price averages update
+      renderCompositeAndWarning();
     }
 
     function klinesToSeries(klines) {
@@ -443,7 +566,6 @@
       return { t, open, high, low, close, vol, takerBuy };
     }
 
-    // Candle-derived scoring (backfill approximation)
     function computeAssetFrom1m(series) {
       const { t, open, high, low, close, vol, takerBuy } = series;
       const n = t.length;
@@ -467,7 +589,6 @@
       const aggr = new Array(n).fill(NaN);
       const asset = new Array(n).fill(NaN);
 
-      // OB proxy: (close-open)/(high-low) clamped to [-1,1]
       const imbProxy = new Array(n).fill(0);
       for (let i=0; i<n; i++) {
         const rng = (high[i] - low[i]);
@@ -476,7 +597,6 @@
       }
 
       for (let i=0; i<n; i++) {
-        // Momentum
         if (i - ms >= 0 && close[i-ms] > 0 && close[i] > 0) {
           const rS = Math.log(close[i] / (close[i-ms] + EPS));
           const momS = tanhScoreSigned(rS, P.k_m_short);
@@ -491,7 +611,6 @@
           mom[i] = momVal;
         }
 
-        // Volatility (std of log returns)
         const retsS = [];
         for (let j=Math.max(1, i - vs + 1); j<=i; j++) if (Number.isFinite(ret[j])) retsS.push(ret[j]);
         const volS = std(retsS);
@@ -505,12 +624,10 @@
         const aV = clamp(P.vol_blend_short, 0, 1);
         volScore[i] = aV * volSScore + (1 - aV) * volLScore;
 
-        // OB proxy mean over iw
         let sumImb = 0, cntImb = 0;
         for (let j=Math.max(0, i - iw + 1); j<=i; j++) { sumImb += imbProxy[j]; cntImb++; }
         ob[i] = clamp(50 + 50 * (cntImb ? (sumImb / cntImb) : 0));
 
-        // Aggression proxy: taker buy ratio
         let bSum = 0, vSum = 0;
         for (let j=Math.max(0, i - aw + 1); j<=i; j++) { bSum += takerBuy[j]; vSum += vol[j]; }
         aggr[i] = (vSum > 0) ? clamp(100 * (bSum / (vSum + EPS))) : 50;
@@ -529,10 +646,10 @@
     }
 
     // ----------------------------
-    // Live WS state (aggTrade + depth10)
+    // Live WS state
     // ----------------------------
     class Rolling1s {
-      constructor() { this.arr = []; } // {t, v}
+      constructor() { this.arr = []; }
       push(t, v) { this.arr.push({t, v}); }
       prune(cutoff) { while (this.arr.length && this.arr[0].t < cutoff) this.arr.shift(); }
       valuesSince(cutoff) { return this.arr.filter(x => x.t >= cutoff).map(x => x.v); }
@@ -552,6 +669,7 @@
         this.curPrice = null;
         this.curBuy = 0;
         this.curSell = 0;
+
         this._lastRetPrice = null;
       }
 
@@ -597,10 +715,8 @@
           return;
         }
 
-        // flush previous second
         this.flushSecond(this.curSec, Number(this.curPrice ?? price), this.curBuy, this.curSell);
 
-        // fill small gaps (cap)
         const gap = sec - this.curSec;
         const fillMax = 30;
         if (gap > 1) {
@@ -609,7 +725,6 @@
           for (let s=this.curSec + 1; s<=fillTo; s++) this.flushSecond(s, lastP, 0, 0);
         }
 
-        // reset current
         this.curSec = sec;
         this.curPrice = price;
         this.curBuy = 0;
@@ -639,10 +754,10 @@
 
       compute(nowSec) {
         this.prune(nowSec);
+
         const pNow = this.prices.latest();
         if (!(pNow > 0)) return null;
 
-        // Momentum short/long
         const pS = this.priceAtOrAfter(nowSec - P.mom_short_s);
         if (!(pS > 0)) return null;
 
@@ -658,7 +773,6 @@
           mom = a * momS + (1 - a) * momL;
         }
 
-        // Vol
         const retsS = this.rets.valuesSince(nowSec - P.vol_short_s);
         const volS = std(retsS);
         const volSScore = tanhScoreNegative(volS, P.k_v_short);
@@ -670,7 +784,6 @@
         const aV = clamp(P.vol_blend_short, 0, 1);
         const vol = aV * volSScore + (1 - aV) * volLScore;
 
-        // OB (real)
         const imbs = this.imb.valuesSince(nowSec - P.imb_window_s);
         let ob = 50;
         if (imbs.length) {
@@ -678,7 +791,6 @@
           ob = clamp(50 + 50 * meanImb);
         }
 
-        // Aggression (real)
         const buys = this.buy1s.valuesSince(nowSec - P.aggr_window_s);
         const sells = this.sell1s.valuesSince(nowSec - P.aggr_window_s);
         const bSum = buys.reduce((a,b)=>a+b,0);
@@ -717,19 +829,15 @@
             tension: 0.25
           }]
         },
-        options: {
-          responsive: true,
-          animation: false,
-          scales: { y: { min: 0, max: 100 } }
-        }
+        options: { responsive: true, animation: false, scales: { y: { min: 0, max: 100 } } }
       });
     }
 
     // ----------------------------
-    // Backfill cache + recompute (weights update uses cache)
+    // Backfill cache + recompute
     // ----------------------------
-    let backfillSeries = [];    // [{t_sec,fgi_raw,fgi}]
-    let backfillCache = null;   // { commonT, idx, bySym }
+    let backfillSeries = [];
+    let backfillCache = null;
     let prevBasketLive = 50.0;
     let lastChartMinute = null;
 
@@ -744,7 +852,6 @@
         bySym[sym] = computeAssetFrom1m(klinesToSeries(kl));
       }
 
-      // align on common timestamps
       const ref = bySym[SYMBOLS[0]].t;
       const has = {};
       for (const sym of SYMBOLS) has[sym] = new Set(bySym[sym].t);
@@ -772,23 +879,18 @@
       if (!backfillCache) { el.textContent = "Backfill: cache not ready."; return; }
 
       const { commonT, idx, bySym } = backfillCache;
-
       const out = [];
       let prev = 50.0;
 
       for (const ts of commonT) {
-        let total = 0;
-        let used = 0;
-
+        let total = 0, used = 0;
         for (const sym of SYMBOLS) {
           const i = idx[sym].get(ts);
           const a = bySym[sym].asset[i];
           const w = Number(WEIGHTS[sym] || 0);
           if (Number.isFinite(a) && w > 0) { total += w * a; used += w; }
         }
-
         if (used <= 0) continue;
-
         const fgiRaw = clamp(total / (used + EPS));
         const fgi = clamp(ALPHA_BACKFILL * fgiRaw + (1 - ALPHA_BACKFILL) * prev);
         prev = fgi;
@@ -796,8 +898,6 @@
       }
 
       backfillSeries = out;
-
-      // chart render
       chart.data.labels = [];
       chart.data.datasets[0].data = [];
       const maxPts = 24 * 60;
@@ -810,10 +910,129 @@
 
       chart.update("none");
       update24hStatsFromChart();
-
       if (backfillSeries.length) prevBasketLive = backfillSeries[backfillSeries.length - 1].fgi;
 
       el.textContent = `Backfill: rendered ${slice.length} points. Weights: ${weightsSummary()}`;
+
+      // composite warning might change if you use "your" fgi history; still update now
+      renderCompositeAndWarning();
+    }
+
+    // ----------------------------
+    // Live compute + UI
+    // ----------------------------
+    function updateTable(snapshotAssets) {
+      const rows = document.getElementById("rows");
+      rows.innerHTML = "";
+      const keys = Object.keys(snapshotAssets).sort();
+      for (const k of keys) {
+        const a = snapshotAssets[k];
+        const tr = document.createElement("tr");
+        tr.innerHTML =
+          `<td>${k}</td>` +
+          `<td>${fmt(a.price, 2)}</td>` +
+          `<td>${fmt(a.asset, 2)}</td>` +
+          `<td>${fmt(a.mom, 2)}</td>` +
+          `<td>${fmt(a.vol, 2)}</td>` +
+          `<td>${fmt(a.ob, 2)}</td>` +
+          `<td>${fmt(a.aggr, 2)}</td>`;
+        rows.appendChild(tr);
+      }
+    }
+
+    function computeLiveOnce() {
+      const nowSec = Math.floor(Date.now() / 1000);
+
+      const assets = {};
+      let total = 0, used = 0;
+
+      for (const sym of SYMBOLS) {
+        const sc = liveStates[sym].compute(nowSec);
+        if (!sc) continue;
+        assets[sym] = sc;
+
+        const w = Number(WEIGHTS[sym] || 0);
+        if (w > 0) { total += w * sc.asset; used += w; }
+      }
+
+      if (used <= 0) return null;
+
+      const fgiRaw = clamp(total / (used + EPS));
+      const fgi = clamp(BASKET_ALPHA_LIVE * fgiRaw + (1 - BASKET_ALPHA_LIVE) * prevBasketLive);
+      prevBasketLive = fgi;
+
+      // persist "your" FGI for composite
+      state.yourFgi = { value: fgi, t_sec: nowSec };
+
+      return { t_sec: nowSec, fgi_raw: fgiRaw, fgi, assets };
+    }
+
+    function updateHeader(snap) {
+      const fgiEl = document.getElementById("fgi");
+      fgiEl.textContent = fmt(snap.fgi, 2);
+      fgiEl.style.color = colorForFGI(snap.fgi);
+
+      const dt = new Date(snap.t_sec * 1000);
+      document.getElementById("meta").textContent =
+        `live raw=${fmt(snap.fgi_raw,2)} | ${dt.toLocaleString()} | alpha=${BASKET_ALPHA_LIVE} | weights: ${weightsSummary()}`;
+    }
+
+    function maybeAppendChartPoint(snap) {
+      const minute = Math.floor(snap.t_sec / CHART_POINT_SECONDS);
+      if (lastChartMinute === null) lastChartMinute = minute;
+
+      if (minute !== lastChartMinute) {
+        lastChartMinute = minute;
+
+        chart.data.labels.push(new Date(snap.t_sec * 1000).toLocaleTimeString());
+        chart.data.datasets[0].data.push(snap.fgi);
+
+        const maxPts = 24 * 60;
+        while (chart.data.labels.length > maxPts) {
+          chart.data.labels.shift();
+          chart.data.datasets[0].data.shift();
+        }
+
+        chart.update("none");
+        update24hStatsFromChart();
+      }
+    }
+
+    // ----------------------------
+    // Weights UI
+    // ----------------------------
+    function initWeightsUI() {
+      const r0 = normalizeWeights(WEIGHTS);
+      if (r0.ok) WEIGHTS = r0.weights;
+
+      writeWeightsToUI(WEIGHTS);
+      setWeightStatus(`Current: ${weightsSummary()}`);
+
+      document.getElementById("btnNormalize").onclick = () => {
+        const raw = readWeightsFromUI();
+        const r = normalizeWeights(raw);
+        if (!r.ok) return setWeightStatus(r.msg, true);
+        writeWeightsToUI(r.weights);
+        setWeightStatus(`Normalized preview: ${SYMBOLS.map(s => `${s}=${(r.weights[s]*100).toFixed(1)}%`).join(" ")}`);
+      };
+
+      document.getElementById("btnApply").onclick = () => {
+        setWeightStatus("Applying…");
+        const raw = readWeightsFromUI();
+        const r = normalizeWeights(raw);
+        if (!r.ok) return setWeightStatus(r.msg, true);
+
+        WEIGHTS = r.weights;
+        writeWeightsToUI(WEIGHTS);
+
+        recomputeBackfillFromCache();
+        lastChartMinute = null;
+
+        setWeightStatus(`Applied: ${weightsSummary()}`);
+
+        // weight change affects basket price used in warning
+        renderCompositeAndWarning();
+      };
     }
 
     // ----------------------------
@@ -860,142 +1079,6 @@
     }
 
     // ----------------------------
-    // Live compute + UI
-    // ----------------------------
-    function updateTable(snapshotAssets) {
-      const rows = document.getElementById("rows");
-      rows.innerHTML = "";
-      const keys = Object.keys(snapshotAssets).sort();
-      for (const k of keys) {
-        const a = snapshotAssets[k];
-        const tr = document.createElement("tr");
-        tr.innerHTML =
-          `<td>${k}</td>` +
-          `<td>${fmt(a.price, 2)}</td>` +
-          `<td>${fmt(a.asset, 2)}</td>` +
-          `<td>${fmt(a.mom, 2)}</td>` +
-          `<td>${fmt(a.vol, 2)}</td>` +
-          `<td>${fmt(a.ob, 2)}</td>` +
-          `<td>${fmt(a.aggr, 2)}</td>`;
-        rows.appendChild(tr);
-      }
-    }
-
-    function computeLiveOnce() {
-      const nowSec = Math.floor(Date.now() / 1000);
-
-      const assets = {};
-      let total = 0;
-      let used = 0;
-
-      for (const sym of SYMBOLS) {
-        const sc = liveStates[sym].compute(nowSec);
-        if (!sc) continue;
-        assets[sym] = sc;
-
-        const w = Number(WEIGHTS[sym] || 0);
-        if (w > 0) { total += w * sc.asset; used += w; }
-      }
-
-      if (used <= 0) return null;
-
-      const fgiRaw = clamp(total / (used + EPS));
-      const fgi = clamp(BASKET_ALPHA_LIVE * fgiRaw + (1 - BASKET_ALPHA_LIVE) * prevBasketLive);
-      prevBasketLive = fgi;
-
-      return { t_sec: nowSec, fgi_raw: fgiRaw, fgi, assets };
-    }
-
-    function updateHeader(snap) {
-      const fgiEl = document.getElementById("fgi");
-      fgiEl.textContent = fmt(snap.fgi, 2);
-      fgiEl.style.color = colorForFGI(snap.fgi);
-
-      const dt = new Date(snap.t_sec * 1000);
-      document.getElementById("meta").textContent =
-        `live raw=${fmt(snap.fgi_raw,2)} | ${dt.toLocaleString()} | alpha=${BASKET_ALPHA_LIVE} | weights: ${weightsSummary()}`;
-    }
-
-    function maybeAppendChartPoint(snap) {
-      const minute = Math.floor(snap.t_sec / CHART_POINT_SECONDS);
-      if (lastChartMinute === null) lastChartMinute = minute;
-
-      if (minute !== lastChartMinute) {
-        lastChartMinute = minute;
-
-        chart.data.labels.push(new Date(snap.t_sec * 1000).toLocaleTimeString());
-        chart.data.datasets[0].data.push(snap.fgi);
-
-        const maxPts = 24 * 60;
-        while (chart.data.labels.length > maxPts) {
-          chart.data.labels.shift();
-          chart.data.datasets[0].data.shift();
-        }
-        chart.update("none");
-        update24hStatsFromChart();
-      }
-    }
-
-    // ----------------------------
-    // Weights UI wiring
-    // ----------------------------
-    function initWeightsUI() {
-      const r0 = normalizeWeights(WEIGHTS);
-      if (r0.ok) WEIGHTS = r0.weights;
-
-      writeWeightsToUI(WEIGHTS);
-      setWeightStatus(`Current: ${weightsSummary()}`);
-
-      document.getElementById("btnNormalize").onclick = () => {
-        const raw = readWeightsFromUI();
-        const r = normalizeWeights(raw);
-        if (!r.ok) return setWeightStatus(r.msg, true);
-        writeWeightsToUI(r.weights);
-        setWeightStatus(`Normalized preview: ${SYMBOLS.map(s => `${s}=${(r.weights[s]*100).toFixed(1)}%`).join(" ")}`);
-      };
-
-      document.getElementById("btnApply").onclick = () => {
-        setWeightStatus("Applying…");
-        const raw = readWeightsFromUI();
-        const r = normalizeWeights(raw);
-        if (!r.ok) return setWeightStatus(r.msg, true);
-
-        WEIGHTS = r.weights;
-        writeWeightsToUI(WEIGHTS);
-
-        // recompute historic series and refresh chart immediately
-        recomputeBackfillFromCache();
-
-        // reset minute gating so chart doesn't “stutter” after apply
-        lastChartMinute = null;
-
-        setWeightStatus(`Applied: ${weightsSummary()}`);
-      };
-    }
-
-    // ----------------------------
-    // External refresh loop
-    // ----------------------------
-    async function refreshExternalFGIs() {
-      // Alternative.me
-      try {
-        const alt = await fetchAlternativeMeFGI();
-        renderExternalFGI("altFgi", "altMeta", "Alternative.me", alt);
-      } catch (e) {
-        renderExternalFGI("altFgi", "altMeta", "Alternative.me", { value: NaN, note: String(e.message || e) });
-      }
-
-      // CMC via proxy
-      const proxyUrl = (document.getElementById("cmcProxy").value || "").trim();
-      try {
-        const cmc = await fetchCMCFGIViaProxy(proxyUrl);
-        renderExternalFGI("cmcFgi", "cmcMeta", "CMC", cmc);
-      } catch (e) {
-        renderExternalFGI("cmcFgi", "cmcMeta", "CMC", { value: NaN, note: String(e.message || e) });
-      }
-    }
-
-    // ----------------------------
     // Boot
     // ----------------------------
     (async () => {
@@ -1003,15 +1086,12 @@
       initWeightsUI();
       setConn("disconnected");
 
-      // Start avg prices
       await refreshAvgPrices();
       setInterval(refreshAvgPrices, PRICE_AVG_REFRESH_MS);
 
-      // External FGIs
       await refreshExternalFGIs();
       setInterval(refreshExternalFGIs, EXTERNAL_FGI_REFRESH_MS);
 
-      // Backfill cache
       try {
         await loadBackfillCacheOnce();
       } catch (e) {
@@ -1019,15 +1099,18 @@
           `Backfill failed: ${String(e.message || e)}`;
       }
 
-      // Live stream
       connectWS();
 
       setInterval(() => {
         const snap = computeLiveOnce();
         if (!snap) return;
+
         updateHeader(snap);
         updateTable(snap.assets);
         maybeAppendChartPoint(snap);
+
+        // recompute composite + warning after your fgi updates
+        renderCompositeAndWarning();
       }, LIVE_UPDATE_EVERY_MS);
     })();
   </script>
