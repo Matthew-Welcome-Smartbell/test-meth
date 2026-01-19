@@ -40,6 +40,18 @@
     .predTitle { font-size:12px; color:#666; margin-bottom:4px; }
     .predVal { font-size:16px; font-weight:700; }
     .predMeta { font-size:12px; color:#666; margin-top:4px; }
+
+    /* NEW: Events/news embeds */
+    .embedWrap { width: 100%; border: 1px solid #eee; border-radius: 12px; overflow: hidden; }
+    .embedHead { padding: 8px 10px; border-bottom: 1px solid #eee; background: #fafafa; font-size: 12px; color: #666; }
+    .tvWrap { width: 100%; }
+    .tvWrap > div, .tvWrap iframe { width: 100% !important; }
+    .eventsTable th { font-size: 12px; color: #666; }
+    .impactHigh { color:#7a0000; font-weight:700; }
+    .impactMed { color:#6a5200; font-weight:700; }
+    .impactLow { color:#666; font-weight:700; }
+    .linkish { color:#0b57d0; text-decoration:none; }
+    .linkish:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -99,6 +111,81 @@
         <div id="warnRed" class="warnBox warnRed" style="display:none;"></div>
         <div id="warnY1" class="warnBox warnYellow" style="display:none;"></div>
         <div id="warnY2" class="warnBox warnYellow" style="display:none;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- NEW: Events & News (No-API embeds + manual key dates) -->
+  <div class="card">
+    <div class="muted">Events &amp; News (no API keys). Macro calendar + top headlines + your curated key dates.</div>
+
+    <div class="row" style="margin-top:10px;">
+      <div class="col" style="flex: 1 1 420px;">
+        <div class="embedWrap">
+          <div class="embedHead">Economic calendar (macro events)</div>
+          <div class="tvWrap">
+            <!-- TradingView Economic Calendar widget -->
+            <div class="tradingview-widget-container">
+              <div class="tradingview-widget-container__widget"></div>
+              <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-events.js" async>
+              {
+                "colorTheme": "light",
+                "isTransparent": false,
+                "width": "100%",
+                "height": 520,
+                "locale": "en",
+                "importanceFilter": "0,1",
+                "currencyFilter": "USD,EUR,GBP,JPY,CNY,NZD,AUD,CAD"
+              }
+              </script>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col" style="flex: 1 1 420px;">
+        <div class="embedWrap">
+          <div class="embedHead">Top stories (market headlines)</div>
+          <div class="tvWrap">
+            <!-- TradingView Top Stories widget -->
+            <div class="tradingview-widget-container">
+              <div class="tradingview-widget-container__widget"></div>
+              <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-timeline.js" async>
+              {
+                "feedMode": "market",
+                "market": "crypto",
+                "colorTheme": "light",
+                "isTransparent": false,
+                "displayMode": "regular",
+                "width": "100%",
+                "height": 520,
+                "locale": "en"
+              }
+              </script>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:12px;" class="embedWrap">
+      <div class="embedHead">Key crypto dates (edit inside the HTML)</div>
+      <div style="padding: 8px 10px;">
+        <div class="small muted" style="margin-bottom:8px;">
+          Tip: Keep this to the 10–30 highest-signal items (major upgrades, ETF deadlines, token unlocks, big conferences).
+        </div>
+        <table class="eventsTable">
+          <thead>
+            <tr>
+              <th style="width:130px;">Date (UTC)</th>
+              <th>Event</th>
+              <th style="width:90px;">Impact</th>
+              <th style="width:110px;">In</th>
+            </tr>
+          </thead>
+          <tbody id="keyDates"></tbody>
+        </table>
+        <div class="small muted" id="keyDatesMeta" style="margin-top:6px;"></div>
       </div>
     </div>
   </div>
@@ -172,6 +259,14 @@
 
     // RESTORED: K_MULT used only for predictions (same semantics as your python script)
     const K_MULT = 18.0;
+
+    // NEW: Curated key dates (UTC). Edit this list.
+    // date: YYYY-MM-DD (UTC), title: string, impact: "High"|"Medium"|"Low", link: optional
+    const KEY_CRYPTO_DATES = [
+      { date: "2026-02-01", title: "Example: Major protocol upgrade window (edit me)", impact: "High", link: "" },
+      { date: "2026-02-12", title: "Example: ETF decision / deadline (edit me)", impact: "High", link: "" },
+      { date: "2026-03-10", title: "Example: Large token unlock (edit me)", impact: "Medium", link: "" }
+    ];
 
     // MyFGI params (seconds)
     const P = {
@@ -307,6 +402,62 @@
     function dayKeyUTC(tSec) {
       const d = new Date(tSec * 1000);
       return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
+    }
+
+    // NEW: Render curated key dates
+    function daysUntilUTC(dateStr) {
+      // dateStr in YYYY-MM-DD; interpret as UTC midnight
+      const [Y,M,D] = dateStr.split("-").map(x => parseInt(x,10));
+      const target = Date.UTC(Y, M-1, D, 0, 0, 0);
+      const now = Date.now();
+      const diffMs = target - now;
+      return Math.floor(diffMs / (24*3600*1000));
+    }
+
+    function impactClass(impact) {
+      const s = String(impact || "").toLowerCase();
+      if (s.startsWith("high")) return "impactHigh";
+      if (s.startsWith("med")) return "impactMed";
+      return "impactLow";
+    }
+
+    function renderKeyDates() {
+      const tbody = document.getElementById("keyDates");
+      const meta = document.getElementById("keyDatesMeta");
+      if (!tbody || !meta) return;
+
+      const rows = (KEY_CRYPTO_DATES || [])
+        .map(x => ({
+          date: String(x.date || "").trim(),
+          title: String(x.title || "").trim(),
+          impact: String(x.impact || "Low").trim(),
+          link: String(x.link || "").trim()
+        }))
+        .filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x.date) && x.title.length)
+        .sort((a,b)=> a.date.localeCompare(b.date));
+
+      tbody.innerHTML = "";
+
+      for (const r of rows) {
+        const tr = document.createElement("tr");
+        const du = daysUntilUTC(r.date);
+        const inTxt = (du >= 0) ? `${du}d` : `${Math.abs(du)}d ago`;
+
+        const titleHtml = r.link
+          ? `<a class="linkish" href="${r.link}" target="_blank" rel="noopener noreferrer">${r.title}</a>`
+          : `${r.title}`;
+
+        tr.innerHTML =
+          `<td>${r.date}</td>` +
+          `<td>${titleHtml}</td>` +
+          `<td class="${impactClass(r.impact)}">${r.impact}</td>` +
+          `<td>${inTxt}</td>`;
+        tbody.appendChild(tr);
+      }
+
+      meta.textContent = rows.length
+        ? `Showing ${rows.length} items. Edit KEY_CRYPTO_DATES in the HTML to update.`
+        : `No key dates configured. Add items to KEY_CRYPTO_DATES in the HTML.`;
     }
 
     // ============================
@@ -870,7 +1021,6 @@
     function fitKLeastSquares(priceSeries, fgiSeries) {
       // priceSeries: [{tSec, close}] daily close
       // fgiSeries: Map dayKey -> fgi (0..100) (we'll align using dayKeyUTC)
-      // dt = 1 day
       if (!priceSeries || priceSeries.length < 10) return NaN;
 
       let prev = null;
@@ -902,12 +1052,7 @@
       return numer / denom;
     }
 
-    // Build daily AvgFGI series (dayKey -> avgFgi) using available sources:
-    // - Alternative.me provides daily points
-    // - MyFGI provides minute points; we average by UTC day
     function buildDailyAvgFgiSeries(myFgiSeriesMinutes, altHistoryDaily) {
-      // myFgiSeriesMinutes: [{t_sec,fgi}] 72h
-      // altHistoryDaily: [{tSec,value}] (daily-ish)
       const myByDay = new Map();
       for (const p of (myFgiSeriesMinutes || [])) {
         const day = dayKeyUTC(p.t_sec);
@@ -926,7 +1071,6 @@
         if (Number.isFinite(a.value)) altMap.set(day, clamp(a.value));
       }
 
-      // union days
       const days = new Set([...myAvg.keys(), ...altMap.keys()]);
       const out = new Map();
       for (const day of days) {
@@ -935,11 +1079,10 @@
         const r = computeAvgFgi(my, alt);
         if (Number.isFinite(r.avg)) out.set(day, r.avg);
       }
-      return out; // Map dayKey -> avgFgi
+      return out;
     }
 
     function computePredictions(avgFgiDailyMap, symbol) {
-      // Uses daily closes and k-fit for THIS symbol.
       const closes = dailyCloses[symbol];
       if (!closes || closes.length < 30 || !avgFgiDailyMap) {
         return { ok:false, msg:"insufficient data" };
@@ -948,12 +1091,10 @@
       const k_fit = fitKLeastSquares(closes, avgFgiDailyMap);
       const k_used = (Number.isFinite(k_fit) ? k_fit : 0) * Number(K_MULT);
 
-      // Take latest available daily avg FGI values for 2d and 7d means.
-      // We compute means on the last N days that exist in both series.
       const daysSorted = Array.from(avgFgiDailyMap.keys()).sort();
       if (!daysSorted.length) return { ok:false, msg:"no daily avg fgi" };
 
-      const lastDays = daysSorted.slice(-14); // plenty for 7
+      const lastDays = daysSorted.slice(-14);
       const vals = lastDays.map(d => avgFgiDailyMap.get(d));
 
       const fgi2 = mean(vals.slice(-2));
@@ -962,9 +1103,6 @@
       const p0 = getPriceNow(symbol);
       if (!Number.isFinite(p0)) return { ok:false, msg:"no current price" };
 
-      // Model: dP ≈ k * (FGI-50) * dt
-      // Tomorrow: dt=1 with fgi2 or fgi7
-      // Week: dt=7 with fgi2 or fgi7 (assuming constant)
       const fc2 = centeredFgi(fgi2);
       const fc7 = centeredFgi(fgi7);
 
@@ -1185,6 +1323,9 @@
       initChart();
       initWeightsUI();
       setConn("disconnected");
+
+      // NEW: render manual key dates (no network needed)
+      renderKeyDates();
 
       try {
         await loadDailyClosesAll();
