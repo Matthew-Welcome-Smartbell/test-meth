@@ -231,6 +231,56 @@
     </table>
   </div>
 
+
+  <div class="card">
+    <div class="muted">ETH Whale Activity (last 24h, Binance aggTrades)</div>
+
+    <div class="row" style="margin-top:10px;">
+      <div class="col tile" style="flex:1 1 220px;">
+        <div class="tileTitle">Threshold (USD notional)</div>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <input id="ethWhaleUsd" type="number" step="10000" min="0" value="250000"/>
+          <button id="btnEthWhaleRefresh" type="button">Refresh</button>
+        </div>
+        <div class="tileMeta small muted" id="ethWhaleMeta">--</div>
+      </div>
+
+      <div class="col tile" style="flex:1 1 220px;">
+        <div class="tileTitle">Whale trades (count)</div>
+        <div id="ethWhaleCount" class="tileVal">--</div>
+        <div id="ethWhaleCountMeta" class="tileMeta"></div>
+      </div>
+
+      <div class="col tile" style="flex:1 1 220px;">
+        <div class="tileTitle">Whale net aggressive (buy - sell)</div>
+        <div id="ethWhaleNet" class="tileVal">--</div>
+        <div id="ethWhaleNetMeta" class="tileMeta"></div>
+      </div>
+
+      <div class="col tile" style="flex:1 1 220px;">
+        <div class="tileTitle">Largest whale trade</div>
+        <div id="ethWhaleMax" class="tileVal">--</div>
+        <div id="ethWhaleMaxMeta" class="tileMeta"></div>
+      </div>
+    </div>
+
+    <div style="margin-top:12px;">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:170px;">Time</th>
+            <th style="width:90px;">Side</th>
+            <th style="width:110px;">Price</th>
+            <th style="width:110px;">ETH</th>
+            <th style="width:130px;">Notional (USD)</th>
+          </tr>
+        </thead>
+        <tbody id="ethWhaleTrades"></tbody>
+      </table>
+      <div class="small muted" id="ethWhaleFooter" style="margin-top:6px;"></div>
+    </div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
     // ============================
@@ -458,6 +508,187 @@
       meta.textContent = rows.length
         ? `Showing ${rows.length} items. Edit KEY_CRYPTO_DATES in the HTML to update.`
         : `No key dates configured. Add items to KEY_CRYPTO_DATES in the HTML.`;
+    }
+
+
+    // ============================
+    // ETH WHALE TRADES (REST aggTrades, last 24h)
+    // ============================
+    const ETH_AGGTRADES_URL = "https://api.binance.com/api/v3/aggTrades";
+
+    function fmtKMG(x) {
+      if (!Number.isFinite(x)) return "--";
+      const ax = Math.abs(x);
+      if (ax >= 1e9) return (x/1e9).toFixed(2) + "B";
+      if (ax >= 1e6) return (x/1e6).toFixed(2) + "M";
+      if (ax >= 1e3) return (x/1e3).toFixed(2) + "K";
+      return x.toFixed(2);
+    }
+
+    async function fetchAggTradesPaged(symbol, startTimeMs, endTimeMs, hardCap=50000) {
+      // Binance limit=1000; paginate using "fromId".
+      // First call by time to get a starting aggTradeId, then walk forward by fromId.
+      const limit = 1000;
+
+      // Step 1: find first page in [startTimeMs, endTimeMs]
+      const u0 = new URL(ETH_AGGTRADES_URL);
+      u0.searchParams.set("symbol", symbol);
+      u0.searchParams.set("startTime", String(startTimeMs));
+      u0.searchParams.set("endTime", String(endTimeMs));
+      u0.searchParams.set("limit", String(limit));
+
+      const r0 = await fetch(u0.toString());
+      if (!r0.ok) throw new Error(`aggTrades initial fetch failed ${r0.status}`);
+      const firstBatch = await r0.json();
+      if (!Array.isArray(firstBatch) || firstBatch.length === 0) return [];
+
+      let out = [];
+      out.push(...firstBatch);
+
+      let fromId = firstBatch[firstBatch.length - 1].a + 1;
+      let guard = 0;
+
+      while (guard < 200 && out.length < hardCap) {
+        guard++;
+
+        const u = new URL(ETH_AGGTRADES_URL);
+        u.searchParams.set("symbol", symbol);
+        u.searchParams.set("fromId", String(fromId));
+        u.searchParams.set("limit", String(limit));
+
+        const res = await fetch(u.toString());
+        if (!res.ok) break;
+
+        const batch = await res.json();
+        if (!Array.isArray(batch) || batch.length === 0) break;
+
+        const within = [];
+        for (const t of batch) {
+          if (t.T < startTimeMs) continue;
+          if (t.T > endTimeMs) break;
+          within.push(t);
+        }
+
+        if (within.length === 0) {
+          if (batch[0]?.T > endTimeMs) break;
+        } else {
+          out.push(...within);
+        }
+
+        const last = batch[batch.length - 1];
+        fromId = last.a + 1;
+
+        if (last.T > endTimeMs) break;
+        if (batch.length < limit) break;
+      }
+
+      out = out.filter(t => t.T >= startTimeMs && t.T <= endTimeMs);
+      return out;
+    }
+
+    function computeWhaleMetrics(aggTrades, whaleUsd) {
+      // aggTrades fields: a (id), p (price), q (qty), T (time), m (isBuyerMaker)
+      // For aggTrade: m=true means buyer is maker => trade was initiated by SELL (aggressive seller).
+      let count = 0;
+      let buyNotional = 0;
+      let sellNotional = 0;
+      let maxNotional = 0;
+      let maxTrade = null;
+
+      const whales = [];
+
+      for (const t of aggTrades) {
+        const price = Number(t.p);
+        const qty = Number(t.q);
+        if (!Number.isFinite(price) || !Number.isFinite(qty)) continue;
+        const notional = price * qty;
+
+        if (notional >= whaleUsd) {
+          count++;
+          const isAggSell = Boolean(t.m);
+          if (isAggSell) sellNotional += notional;
+          else buyNotional += notional;
+
+          if (notional > maxNotional) {
+            maxNotional = notional;
+            maxTrade = { ...t, price, qty, notional, side: isAggSell ? "SELL" : "BUY" };
+          }
+          whales.push({ ...t, price, qty, notional, side: isAggSell ? "SELL" : "BUY" });
+        }
+      }
+
+      whales.sort((a,b)=> b.notional - a.notional);
+
+      const net = buyNotional - sellNotional;
+      const total = buyNotional + sellNotional;
+
+      return { whales, count, buyNotional, sellNotional, net, total, maxTrade };
+    }
+
+    function renderEthWhalesUI(metrics, startMs, endMs, whaleUsd, wasCapped=false) {
+      const meta = document.getElementById("ethWhaleMeta");
+      const countEl = document.getElementById("ethWhaleCount");
+      const countMeta = document.getElementById("ethWhaleCountMeta");
+      const netEl = document.getElementById("ethWhaleNet");
+      const netMeta = document.getElementById("ethWhaleNetMeta");
+      const maxEl = document.getElementById("ethWhaleMax");
+      const maxMeta = document.getElementById("ethWhaleMaxMeta");
+      const tbody = document.getElementById("ethWhaleTrades");
+      const footer = document.getElementById("ethWhaleFooter");
+
+      if (!meta || !countEl || !tbody || !footer) return;
+
+      const nowStr = new Date().toLocaleString();
+      meta.textContent = `Window: ${new Date(startMs).toLocaleString()} → ${new Date(endMs).toLocaleString()} | updated ${nowStr}`;
+
+      countEl.textContent = String(metrics.count ?? 0);
+      countMeta.textContent = `≥ $${fmtKMG(whaleUsd)} notional`;
+
+      netEl.textContent = fmtKMG(metrics.net);
+      netEl.style.color = (metrics.net >= 0) ? "green" : "red";
+      netMeta.textContent = `Buy ${fmtKMG(metrics.buyNotional)} / Sell ${fmtKMG(metrics.sellNotional)}`;
+
+      if (metrics.maxTrade) {
+        maxEl.textContent = fmtKMG(metrics.maxTrade.notional);
+        maxMeta.textContent = `${metrics.maxTrade.side} @ ${fmt(metrics.maxTrade.price,2)} | ${fmt(metrics.maxTrade.qty,3)} ETH`;
+      } else {
+        maxEl.textContent = "--";
+        maxMeta.textContent = "No trades above threshold";
+      }
+
+      tbody.innerHTML = "";
+      const top = (metrics.whales || []).slice(0, 50);
+      for (const t of top) {
+        const tr = document.createElement("tr");
+        const sideColor = (t.side === "BUY") ? "green" : "red";
+        tr.innerHTML =
+          `<td>${new Date(t.T).toLocaleString()}</td>` +
+          `<td style="color:${sideColor}; font-weight:700;">${t.side}</td>` +
+          `<td>${fmt(t.price,2)}</td>` +
+          `<td>${fmt(t.qty,3)}</td>` +
+          `<td>${fmtKMG(t.notional)}</td>`;
+        tbody.appendChild(tr);
+      }
+
+      footer.textContent =
+        `Showing top ${top.length} whale trades by notional (Binance ETHUSDT aggTrades). “Side” is aggressor side (maker flag).` +
+        (wasCapped ? " Note: 24h window had high trade count; list/metrics computed from a capped sample." : "");
+    }
+
+    async function refreshEthWhalesOnce() {
+      const input = document.getElementById("ethWhaleUsd");
+      const whaleUsd = Math.max(0, Number(input?.value || 0));
+
+      const endMs = Date.now();
+      const startMs = endMs - 24*3600*1000;
+
+      // Fetch ETHUSDT aggTrades for last 24h
+      const hardCap = 60000; // protect browser
+      const agg = await fetchAggTradesPaged("ETHUSDT", startMs, endMs, hardCap);
+      const wasCapped = agg.length >= hardCap;
+
+      const metrics = computeWhaleMetrics(agg, whaleUsd);
+      renderEthWhalesUI(metrics, startMs, endMs, whaleUsd, wasCapped);
     }
 
     // ============================
@@ -1347,6 +1578,28 @@
       }
 
       connectWS();
+
+
+      // ETH whales boot + refresh button
+      try {
+        const btn = document.getElementById("btnEthWhaleRefresh");
+        if (btn) {
+          btn.onclick = async () => {
+            try { await refreshEthWhalesOnce(); }
+            catch (e) {
+              const foot = document.getElementById("ethWhaleFooter");
+              if (foot) foot.textContent = `ETH whale fetch failed: ${String(e.message || e)}`;
+            }
+          };
+        }
+
+        // initial load + periodic refresh
+        await refreshEthWhalesOnce();
+        setInterval(async () => { try { await refreshEthWhalesOnce(); } catch {} }, 60 * 1000);
+      } catch (e) {
+        // fail silently if elements missing
+      }
+
 
       setInterval(async () => {
         try { await refreshAlt(); } catch {}
