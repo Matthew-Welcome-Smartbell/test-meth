@@ -57,6 +57,12 @@
 
         <div class="row" style="margin-top:10px;">
           <div class="col tile" style="flex:1 1 260px;">
+            <div class="tileTitle">Average FGI (My + Alternative.me)</div>
+            <div id="avgFgi" class="tileVal">--</div>
+            <div id="avgMeta" class="tileMeta"></div>
+          </div>
+
+          <div class="col tile" style="flex:1 1 260px;">
             <div class="tileTitle">ETH MyFGI</div>
             <div id="myFgi" class="tileVal">--</div>
             <div id="myMeta" class="tileMeta"></div>
@@ -186,6 +192,9 @@
     const SYMBOLS = ["ETHUSDT"];
     const WEIGHTS = { "ETHUSDT": 1.0 };
 
+    // Average FGI uses MyFGI + Alternative.me (renormalized on available sources)
+    const AVG_W_DESIRED = { my: 0.10, alt: 0.45 };
+
     const LIVE_UPDATE_EVERY_MS = 5000;
     const CHART_POINT_SECONDS = 60;
 
@@ -196,7 +205,8 @@
     const K_MULT = 18.0;
 
     // Alternative.me Fear & Greed (market-wide)
-    const ALT_URL = "https://api.alternative.me/fng/?limit=1&format=json";
+    const ALT_URL = "https://api.alternative.me/fng/?limit=500&format=json";
+    let altHistory = null;
     let altNow = NaN;
     let altNowMeta = "";
 
@@ -284,6 +294,24 @@
       metaEl.textContent = meta || "";
     }
 
+    function computeAvgFgi(my, alt) {
+      const wMy = Number(AVG_W_DESIRED.my || 0);
+      const wAlt = Number(AVG_W_DESIRED.alt || 0);
+      const hasMy = Number.isFinite(my);
+      const hasAlt = Number.isFinite(alt);
+      const sumAvail = (hasMy ? wMy : 0) + (hasAlt ? wAlt : 0);
+      if (sumAvail <= 0) return { avg: NaN, meta: "avg unavailable (missing sources)" };
+
+      const myN = hasMy ? (wMy / sumAvail) : 0;
+      const altN = hasAlt ? (wAlt / sumAvail) : 0;
+
+      return {
+        avg: clamp(myN*my + altN*alt),
+        meta: `using renormalized weights: my=${(myN*100).toFixed(1)}% alt=${(altN*100).toFixed(1)}%`
+      };
+    }
+
+
     function dayKeyUTC(tSec) {
       const d = new Date(tSec * 1000);
       return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
@@ -306,27 +334,31 @@
       el.textContent = msg;
     }
 
-    function evaluateWarnings(myFgiNow, pricePack, myFgiDailyLast3) {
+    function evaluateWarnings(avgFgiNow, pricePack, avgFgiDailyLast3) {
       const eth = pricePack.eth;
 
       const redParts = [];
-      const cond30 = (Number.isFinite(eth.p) && Number.isFinite(eth.a30) && eth.p > eth.a30 * 1.05 && Number.isFinite(myFgiNow) && myFgiNow < 40);
-      const cond60 = (Number.isFinite(eth.p) && Number.isFinite(eth.a60) && eth.p > eth.a60 * 1.05 && Number.isFinite(myFgiNow) && myFgiNow < 40);
-      const cond90 = (Number.isFinite(eth.p) && Number.isFinite(eth.a90) && eth.p > eth.a90 * 1.05 && Number.isFinite(myFgiNow) && myFgiNow < 40);
+      const p = eth.p;
 
-      if (cond30) redParts.push("ETH: price > 30d avg * 1.05 AND MyFGI < 40");
-      if (cond60) redParts.push("ETH: price > 60d avg * 1.05 AND MyFGI < 40");
-      if (cond90) redParts.push("ETH: price > 90d avg * 1.05 AND MyFGI < 40");
+      const cond30 = (Number.isFinite(p) && Number.isFinite(eth.a30) && p > eth.a30 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
+      const cond60 = (Number.isFinite(p) && Number.isFinite(eth.a60) && p > eth.a60 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
+      const cond90 = (Number.isFinite(p) && Number.isFinite(eth.a90) && p > eth.a90 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
+
+      if (cond30) redParts.push(`ETH: price > 30d avg * 1.05 AND avg FGI < 40`);
+      if (cond60) redParts.push(`ETH: price > 60d avg * 1.05 AND avg FGI < 40`);
+      if (cond90) redParts.push(`ETH: price > 90d avg * 1.05 AND avg FGI < 40`);
 
       setWarn("warnRed", redParts.length > 0, redParts.length ? `RED WARNING: ${redParts.join(" | ")}` : "");
 
-      const y1 = (Number.isFinite(myFgiNow) && myFgiNow > 50);
-      setWarn("warnY1", y1, y1 ? "WARNING: MyFGI > 50, consider reduced leverage" : "");
+      const y1 = (Number.isFinite(avgFgiNow) && avgFgiNow > 50);
+      setWarn("warnY1", y1, y1 ? "WARNING: average FGI > 50, consider reduced leverage" : "");
 
       let y2 = false;
-      if (myFgiDailyLast3 && myFgiDailyLast3.length >= 3) {
-        y2 = myFgiDailyLast3.slice(-3).every(x => Number.isFinite(x.avg) && x.avg < 37);
+      if (avgFgiDailyLast3 && avgFgiDailyLast3.length >= 3) {
+        y2 = avgFgiDailyLast3.slice(-3).every(x => Number.isFinite(x.avg) && x.avg < 37);
       }
+      setWarn("warnY2", y2, y2 ? "WARNING: average FGI < 37 for 3+ days, possible drawdown, consider reduced leverage" : "");
+    }
       setWarn("warnY2", y2, y2 ? "WARNING: MyFGI < 37 for 3+ days, possible drawdown, consider reduced leverage" : "");
     }
 
@@ -340,11 +372,28 @@ async function refreshAlt() {
     const res = await fetch(ALT_URL, { method: "GET" });
     if (!res.ok) throw new Error(`Alternative.me fetch failed ${res.status}`);
     const j = await res.json();
-    const d = j?.data?.[0];
-    const v = Number(d?.value);
-    altNow = clamp(v);
-    altNowMeta = `${String(d?.value_classification || "")} | ${new Date(Number(d?.timestamp)*1000).toLocaleString()}`;
+    const arr = Array.isArray(j?.data) ? j.data : [];
+    altHistory = arr
+      .map(x => ({ tSec: Number(x.timestamp), value: clamp(Number(x.value)), cls: String(x.value_classification||"") }))
+      .filter(x => Number.isFinite(x.tSec) && Number.isFinite(x.value))
+      .sort((a,b)=>a.tSec-b.tSec);
+
+    if (altHistory.length) {
+      const last = altHistory[altHistory.length - 1];
+      altNow = last.value;
+      altNowMeta = `${last.cls} | ${new Date(last.tSec*1000).toLocaleString()}`;
+    } else {
+      altNow = NaN;
+      altNowMeta = "Alternative.me returned no data";
+    }
+
+function computeAltDailyLast3() {
+  if (!altHistory || altHistory.length < 3) return [];
+  return altHistory.slice(-3).map(x => ({ day: dayKeyUTC(x.tSec), avg: clamp(x.value) }));
+}
+
   } catch (e) {
+    altHistory = null;
     altNow = NaN;
     altNowMeta = `Alternative.me unavailable: ${String(e.message || e)}`;
   }
@@ -1237,15 +1286,31 @@ setInterval(() => { refreshAlt(); }, 60 * 1000);
           `raw=${fmt(mySnap.fgi_raw,2)} | alpha=${BASKET_ALPHA_LIVE} | ${new Date(mySnap.t_sec*1000).toLocaleString()}`
         );
 
-        
+        // Update Alternative.me tile (market-wide sentiment reference)
+        setTile("altFgi", "altMeta", altNow, altNowMeta);
 
-// Update Alternative.me tile (market-wide sentiment reference)
-setTile("altFgi", "altMeta", altNow, altNowMeta);
+        // Average FGI (My + Alternative.me)
+        const avgRes = computeAvgFgi(mySnap.fgi, altNow);
+        setTile("avgFgi", "avgMeta", avgRes.avg, avgRes.meta);
 
-const pricePack = updatePriceStatsUI();
+        const pricePack = updatePriceStatsUI();
 
+        // Build last-3-days average FGI series from MyFGI daily + Alternative.me daily
         const myDaily = computeMyFgiDailyAveragesLast3Days();
-        evaluateWarnings(mySnap.fgi, pricePack, myDaily);
+        const altDaily = computeAltDailyLast3();
+
+        const byDay = new Map();
+        for (const x of myDaily) byDay.set(x.day, { day: x.day, my: x.avg, alt: NaN });
+        for (const x of altDaily) {
+          const o = byDay.get(x.day) || { day: x.day, my: NaN, alt: NaN };
+          o.alt = x.avg;
+          byDay.set(x.day, o);
+        }
+        const dailyMerged = Array.from(byDay.values()).sort((a,b)=>a.day.localeCompare(b.day));
+        const avgDaily = dailyMerged.map(d => ({ day: d.day, avg: computeAvgFgi(d.my, d.alt).avg }))
+          .filter(x => Number.isFinite(x.avg));
+
+        evaluateWarnings(avgRes.avg, pricePack, avgDaily);
 
         updatePredictionsUI();
 
