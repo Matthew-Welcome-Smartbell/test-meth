@@ -915,52 +915,82 @@ function computeAltDailyLast3() {
     const liveStates = { "ETHUSDT": new LiveSymbolState("ETHUSDT") };
 
     // ============================
-    // BINANCE WS
-    // ============================
-    let ws = null;
-    let wsBackoffMs = 500;
+// BINANCE WS (with endpoint fallback)
+// ============================
+let ws = null;
+let wsBackoffMs = 500;
 
-    function connectWS() {
-      const streams = [];
-      for (const sym of SYMBOLS) {
-        const s = sym.toLowerCase();
-        streams.push(`${s}@aggTrade`);
-        streams.push(`${s}@depth10@100ms`);
-      }
-      const url = `wss://stream.binance.com:9443/stream?streams=${streams.join("/")}`;
-      ws = new WebSocket(url);
+// Some networks block port 9443. We rotate through known-good endpoints.
+// Binance docs list 9443 and 443; binance.vision is market-data only (fine for this page).
+const WS_BASES = [
+  "wss://stream.binance.com:9443/stream",
+  "wss://stream.binance.com:443/stream",
+  "wss://stream.binance.com/stream",
+  "wss://data-stream.binance.vision/stream"
+];
+let wsBaseIdx = 0;
 
-      ws.onopen = () => { setConn("connected"); wsBackoffMs = 500; };
-      ws.onclose = () => {
-        setConn("disconnected");
-        setTimeout(connectWS, wsBackoffMs);
-        wsBackoffMs = Math.min(15000, wsBackoffMs * 1.5);
-      };
-      ws.onerror = () => { try { ws.close(); } catch {} };
+function buildStreamQuery() {
+  const streams = [];
+  for (const sym of SYMBOLS) {
+    const s = sym.toLowerCase();
+    streams.push(`${s}@aggTrade`);
+    streams.push(`${s}@depth10@100ms`);
+  }
+  return streams.join("/");
+}
 
-      ws.onmessage = (ev) => {
-        let msg;
-        try { msg = JSON.parse(ev.data); } catch { return; }
-        const stream = msg.stream || "";
-        const d = msg.data || {};
+function connectWS() {
+  const streamQuery = buildStreamQuery();
+  const base = WS_BASES[wsBaseIdx % WS_BASES.length];
+  const url = `${base}?streams=${streamQuery}`;
 
-        const sym = stream.split("@")[0].toUpperCase();
-        if (!liveStates[sym]) return;
+  // Close any existing socket before recreating (avoids multiple concurrent attempts)
+  try { if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) ws.close(); } catch {}
 
-        if (stream.endsWith("@aggTrade")) {
-          liveStates[sym].onAggTrade(Number(d.E), Number(d.p), Number(d.q), Boolean(d.m));
-          lastTradePrice[sym] = Number(d.p);
-          return;
-        }
-        if (stream.includes("@depth10")) {
-          liveStates[sym].onDepth10(Number(d.E), d.b || [], d.a || []);
-          return;
-        }
-      };
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    setConn("connected");
+    wsBackoffMs = 500;
+  };
+
+  ws.onclose = () => {
+    setConn("disconnected");
+    // Try next endpoint on each failed attempt
+    wsBaseIdx = (wsBaseIdx + 1) % WS_BASES.length;
+    setTimeout(connectWS, wsBackoffMs);
+    wsBackoffMs = Math.min(15000, wsBackoffMs * 1.5);
+  };
+
+  ws.onerror = () => {
+    // Trigger onclose() path
+    try { ws.close(); } catch {}
+  };
+
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    const stream = msg.stream || "";
+    const d = msg.data || {};
+
+    const sym = stream.split("@")[0].toUpperCase();
+    if (!liveStates[sym]) return;
+
+    if (stream.endsWith("@aggTrade")) {
+      liveStates[sym].onAggTrade(Number(d.E), Number(d.p), Number(d.q), Boolean(d.m));
+      lastTradePrice[sym] = Number(d.p);
+      return;
     }
+    if (stream.includes("@depth10")) {
+      liveStates[sym].onDepth10(Number(d.E), d.b || [], d.a || []);
+      return;
+    }
+  };
+}
 
-    // ============================
-    // LIVE COMPUTE + UI
+// ============================
+// LIVE COMPUTE + UI
     // ============================
     function updateTable(snapshotAssets) {
       const rows = document.getElementById("rows");
