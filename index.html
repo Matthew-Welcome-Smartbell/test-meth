@@ -61,6 +61,12 @@
             <div id="myFgi" class="tileVal">--</div>
             <div id="myMeta" class="tileMeta"></div>
           </div>
+
+          <div class="col tile" style="flex:1 1 260px;">
+            <div class="tileTitle">Alternative.me FGI (market-wide)</div>
+            <div id="altFgi" class="tileVal">--</div>
+            <div id="altMeta" class="tileMeta"></div>
+          </div>
         </div>
 
         <div id="priceStats" class="muted small" style="margin-top:10px;"></div>
@@ -188,6 +194,11 @@
 
     // Prediction multiplier (same semantics as your earlier script)
     const K_MULT = 18.0;
+
+    // Alternative.me Fear & Greed (market-wide)
+    const ALT_URL = "https://api.alternative.me/fng/?limit=1&format=json";
+    let altNow = NaN;
+    let altNowMeta = "";
 
     // Whale threshold (fixed)
     const ETH_WHALE_USD = 50000;
@@ -320,7 +331,26 @@
     }
 
     // ============================
-    // BINANCE REST (prices + backfill)
+    
+// ============================
+// ALTERNATIVE.ME (fast: latest only)
+// ============================
+async function refreshAlt() {
+  try {
+    const res = await fetch(ALT_URL, { method: "GET" });
+    if (!res.ok) throw new Error(`Alternative.me fetch failed ${res.status}`);
+    const j = await res.json();
+    const d = j?.data?.[0];
+    const v = Number(d?.value);
+    altNow = clamp(v);
+    altNowMeta = `${String(d?.value_classification || "")} | ${new Date(Number(d?.timestamp)*1000).toLocaleString()}`;
+  } catch (e) {
+    altNow = NaN;
+    altNowMeta = `Alternative.me unavailable: ${String(e.message || e)}`;
+  }
+}
+
+// BINANCE REST (prices + backfill)
     // ============================
     async function fetchKlines(symbol, interval, startMs, endMs, limit=1000) {
       const url = new URL("https://api.binance.com/api/v3/klines");
@@ -1168,7 +1198,13 @@
       setConn("disconnected");
 
       // Connect WS immediately
-      try { connectWS(); } catch (e) {}
+      try { connectWS();
+
+// Alternative.me fetch (non-blocking)
+refreshAlt();
+setInterval(() => { refreshAlt(); }, 60 * 1000);
+
+ } catch (e) {}
 
       // Kick off slow tasks in parallel (non-blocking)
       loadDailyClosesAll().catch(e => {
@@ -1201,7 +1237,12 @@
           `raw=${fmt(mySnap.fgi_raw,2)} | alpha=${BASKET_ALPHA_LIVE} | ${new Date(mySnap.t_sec*1000).toLocaleString()}`
         );
 
-        const pricePack = updatePriceStatsUI();
+        
+
+// Update Alternative.me tile (market-wide sentiment reference)
+setTile("altFgi", "altMeta", altNow, altNowMeta);
+
+const pricePack = updatePriceStatsUI();
 
         const myDaily = computeMyFgiDailyAveragesLast3Days();
         evaluateWarnings(mySnap.fgi, pricePack, myDaily);
