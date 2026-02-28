@@ -117,7 +117,7 @@
 
   <!-- NEW: Events & News (No-API embeds + manual key dates) -->
   <div class="card">
-    <div class="muted">Events &amp; News (no API keys). Macro calendar + top headlines + your curated key dates.</div>
+    <div class="muted">Events &amp; News (no API keys). Macro calendar + top headlines.</div>
 
     <div class="row" style="margin-top:10px;">
       <div class="col" style="flex: 1 1 420px;">
@@ -168,27 +168,9 @@
       </div>
     </div>
 
-    <div style="margin-top:12px;" class="embedWrap">
-      <div class="embedHead">Key crypto dates (edit inside the HTML)</div>
-      <div style="padding: 8px 10px;">
-        <div class="small muted" style="margin-bottom:8px;">
-          Tip: Keep this to the 10–30 highest-signal items (major upgrades, ETF deadlines, token unlocks, big conferences).
-        </div>
-        <table class="eventsTable">
-          <thead>
-            <tr>
-              <th style="width:130px;">Date (UTC)</th>
-              <th>Event</th>
-              <th style="width:90px;">Impact</th>
-              <th style="width:110px;">In</th>
-            </tr>
-          </thead>
-          <tbody id="keyDates"></tbody>
-        </table>
-        <div class="small muted" id="keyDatesMeta" style="margin-top:6px;"></div>
-      </div>
-    </div>
+    
   </div>
+
 
   <div class="card">
     <div class="muted">MyFGI history (last 24h, 1 point/min). Backfill fetch uses last 72h to support “3+ days” warnings.</div>
@@ -199,25 +181,7 @@
     </div>
   </div>
 
-  <div class="card">
-    <div class="muted">MyFGI basket weights (BTC/ETH only; auto-normalized)</div>
-    <div class="row" style="margin-top:10px;">
-      <div class="col">
-        <div class="small muted">BTCUSDT</div>
-        <input id="w_BTCUSDT" type="number" step="0.01" min="0" value="0.50"/>
-      </div>
-      <div class="col">
-        <div class="small muted">ETHUSDT</div>
-        <input id="w_ETHUSDT" type="number" step="0.01" min="0" value="0.50"/>
-      </div>
-    </div>
-    <div class="row" style="margin-top:10px; align-items:center;">
-      <button id="btnNormalize" type="button">Normalize</button>
-      <button id="btnApply" type="button">Apply (recompute MyFGI chart + live)</button>
-      <span id="wStatus" class="small muted"></span>
-      <span id="wError" class="small err"></span>
-    </div>
-  </div>
+  
 
   <div class="card">
     <div class="muted">Live per-asset components (MyFGI, computed from Binance WS)</div>
@@ -237,11 +201,8 @@
 
     <div class="row" style="margin-top:10px;">
       <div class="col tile" style="flex:1 1 220px;">
-        <div class="tileTitle">Threshold (USD notional)</div>
-        <div style="display:flex; gap:10px; align-items:center;">
-          <input id="ethWhaleUsd" type="number" step="10000" min="0" value="250000"/>
-          <button id="btnEthWhaleRefresh" type="button">Refresh</button>
-        </div>
+        <div class="tileTitle">Whale threshold (USD notional)</div>
+        <div id="ethWhaleThreshold" class="tileVal">$50K</div>
         <div class="tileMeta small muted" id="ethWhaleMeta">--</div>
       </div>
 
@@ -288,8 +249,8 @@
     // ============================
     const SYMBOLS = ["BTCUSDT", "ETHUSDT"];
 
-    // MyFGI weights (mutable via UI)
-    let WEIGHTS = { "BTCUSDT": 0.50, "ETHUSDT": 0.50 };
+    // MyFGI basket weights (fixed)
+    const WEIGHTS = { "BTCUSDT": 0.50, "ETHUSDT": 0.50 };
 
     // Average weights requested previously (CoinGlass/CMC removed in Option 1).
     // We renormalize using only available sources (my + alt).
@@ -310,13 +271,8 @@
     // RESTORED: K_MULT used only for predictions (same semantics as your python script)
     const K_MULT = 18.0;
 
-    // NEW: Curated key dates (UTC). Edit this list.
-    // date: YYYY-MM-DD (UTC), title: string, impact: "High"|"Medium"|"Low", link: optional
-    const KEY_CRYPTO_DATES = [
-      { date: "2026-02-01", title: "Example: Major protocol upgrade window (edit me)", impact: "High", link: "" },
-      { date: "2026-02-12", title: "Example: ETF decision / deadline (edit me)", impact: "High", link: "" },
-      { date: "2026-03-10", title: "Example: Large token unlock (edit me)", impact: "Medium", link: "" }
-    ];
+    // Whale threshold (fixed)
+    const ETH_WHALE_USD = 50000;
 
     // MyFGI params (seconds)
     const P = {
@@ -398,41 +354,6 @@
       metaEl.textContent = meta || "";
     }
 
-    function normalizeWeights(obj) {
-      const clean = {};
-      let sum = 0;
-      for (const sym of SYMBOLS) {
-        const v = Number(obj[sym]);
-        const w = (Number.isFinite(v) && v > 0) ? v : 0;
-        clean[sym] = w;
-        sum += w;
-      }
-      if (sum <= 0) return { ok: false, weights: null, msg: "Weights sum to 0. Enter at least one positive weight." };
-      for (const sym of SYMBOLS) clean[sym] = clean[sym] / sum;
-      return { ok: true, weights: clean, msg: "Normalized (sum=1)." };
-    }
-
-    function readWeightsFromUI() {
-      return {
-        "BTCUSDT": Number(document.getElementById("w_BTCUSDT").value),
-        "ETHUSDT": Number(document.getElementById("w_ETHUSDT").value),
-      };
-    }
-
-    function writeWeightsToUI(w) {
-      document.getElementById("w_BTCUSDT").value = (Number(w["BTCUSDT"]) || 0).toFixed(4);
-      document.getElementById("w_ETHUSDT").value = (Number(w["ETHUSDT"]) || 0).toFixed(4);
-    }
-
-    function setWeightStatus(msg, isError=false) {
-      document.getElementById("wStatus").textContent = isError ? "" : msg;
-      document.getElementById("wError").textContent = isError ? msg : "";
-    }
-
-    function weightsSummary() {
-      return SYMBOLS.map(s => `${s}=${(WEIGHTS[s]*100).toFixed(1)}%`).join(" ");
-    }
-
     function update24hStatsFromChart(chart) {
       const data = chart?.data?.datasets?.[0]?.data || [];
       if (!data.length) return { hi: null, lo: null, avg: null, n: 0 };
@@ -454,64 +375,7 @@
       return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
     }
 
-    // NEW: Render curated key dates
-    function daysUntilUTC(dateStr) {
-      // dateStr in YYYY-MM-DD; interpret as UTC midnight
-      const [Y,M,D] = dateStr.split("-").map(x => parseInt(x,10));
-      const target = Date.UTC(Y, M-1, D, 0, 0, 0);
-      const now = Date.now();
-      const diffMs = target - now;
-      return Math.floor(diffMs / (24*3600*1000));
-    }
-
-    function impactClass(impact) {
-      const s = String(impact || "").toLowerCase();
-      if (s.startsWith("high")) return "impactHigh";
-      if (s.startsWith("med")) return "impactMed";
-      return "impactLow";
-    }
-
-    function renderKeyDates() {
-      const tbody = document.getElementById("keyDates");
-      const meta = document.getElementById("keyDatesMeta");
-      if (!tbody || !meta) return;
-
-      const rows = (KEY_CRYPTO_DATES || [])
-        .map(x => ({
-          date: String(x.date || "").trim(),
-          title: String(x.title || "").trim(),
-          impact: String(x.impact || "Low").trim(),
-          link: String(x.link || "").trim()
-        }))
-        .filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x.date) && x.title.length)
-        .sort((a,b)=> a.date.localeCompare(b.date));
-
-      tbody.innerHTML = "";
-
-      for (const r of rows) {
-        const tr = document.createElement("tr");
-        const du = daysUntilUTC(r.date);
-        const inTxt = (du >= 0) ? `${du}d` : `${Math.abs(du)}d ago`;
-
-        const titleHtml = r.link
-          ? `<a class="linkish" href="${r.link}" target="_blank" rel="noopener noreferrer">${r.title}</a>`
-          : `${r.title}`;
-
-        tr.innerHTML =
-          `<td>${r.date}</td>` +
-          `<td>${titleHtml}</td>` +
-          `<td class="${impactClass(r.impact)}">${r.impact}</td>` +
-          `<td>${inTxt}</td>`;
-        tbody.appendChild(tr);
-      }
-
-      meta.textContent = rows.length
-        ? `Showing ${rows.length} items. Edit KEY_CRYPTO_DATES in the HTML to update.`
-        : `No key dates configured. Add items to KEY_CRYPTO_DATES in the HTML.`;
-    }
-
-
-    // ============================
+        // ============================
     // ETH WHALE TRADES (REST aggTrades, last 24h)
     // ============================
     const ETH_AGGTRADES_URL = "https://api.binance.com/api/v3/aggTrades";
@@ -635,6 +499,8 @@
       const maxMeta = document.getElementById("ethWhaleMaxMeta");
       const tbody = document.getElementById("ethWhaleTrades");
       const footer = document.getElementById("ethWhaleFooter");
+      const thrEl = document.getElementById("ethWhaleThreshold");
+      if (thrEl) thrEl.textContent = `$${fmtKMG(whaleUsd)}`;
 
       if (!meta || !countEl || !tbody || !footer) return;
 
@@ -676,8 +542,7 @@
     }
 
     async function refreshEthWhalesOnce() {
-      const input = document.getElementById("ethWhaleUsd");
-      const whaleUsd = Math.max(0, Number(input?.value || 0));
+      const whaleUsd = ETH_WHALE_USD;
 
       const endMs = Date.now();
       const startMs = endMs - 24*3600*1000;
@@ -1513,50 +1378,11 @@
     }
 
     // ============================
-    // WEIGHTS UI WIRING
-    // ============================
-    function initWeightsUI() {
-      const r0 = normalizeWeights(WEIGHTS);
-      if (r0.ok) WEIGHTS = r0.weights;
-
-      writeWeightsToUI(WEIGHTS);
-      setWeightStatus(`Current: ${weightsSummary()}`);
-
-      document.getElementById("btnNormalize").onclick = () => {
-        const raw = readWeightsFromUI();
-        const r = normalizeWeights(raw);
-        if (!r.ok) return setWeightStatus(r.msg, true);
-        writeWeightsToUI(r.weights);
-        setWeightStatus(`Normalized preview: BTC=${(r.weights["BTCUSDT"]*100).toFixed(1)}% ETH=${(r.weights["ETHUSDT"]*100).toFixed(1)}%`);
-      };
-
-      document.getElementById("btnApply").onclick = () => {
-        setWeightStatus("Applying…");
-        const raw = readWeightsFromUI();
-        const r = normalizeWeights(raw);
-        if (!r.ok) return setWeightStatus(r.msg, true);
-
-        WEIGHTS = r.weights;
-        writeWeightsToUI(WEIGHTS);
-
-        // Recompute MyFGI backfill + reseed live EMA to avoid a jump
-        recomputeMyFgiFromCache();
-        lastChartMinute = null;
-
-        setWeightStatus(`Applied: ${weightsSummary()}`);
-      };
-    }
-
-    // ============================
     // BOOT
     // ============================
     (async () => {
       initChart();
-      initWeightsUI();
       setConn("disconnected");
-
-      // NEW: render manual key dates (no network needed)
-      renderKeyDates();
 
       try {
         await loadDailyClosesAll();
@@ -1580,26 +1406,14 @@
       connectWS();
 
 
-      // ETH whales boot + refresh button
+      // ETH whales: initial load + periodic refresh (fixed threshold)
       try {
-        const btn = document.getElementById("btnEthWhaleRefresh");
-        if (btn) {
-          btn.onclick = async () => {
-            try { await refreshEthWhalesOnce(); }
-            catch (e) {
-              const foot = document.getElementById("ethWhaleFooter");
-              if (foot) foot.textContent = `ETH whale fetch failed: ${String(e.message || e)}`;
-            }
-          };
-        }
-
-        // initial load + periodic refresh
         await refreshEthWhalesOnce();
         setInterval(async () => { try { await refreshEthWhalesOnce(); } catch {} }, 60 * 1000);
       } catch (e) {
-        // fail silently if elements missing
+        const foot = document.getElementById("ethWhaleFooter");
+        if (foot) foot.textContent = `ETH whale fetch failed: ${String(e.message || e)}`;
       }
-
 
       setInterval(async () => {
         try { await refreshAlt(); } catch {}
@@ -1614,7 +1428,7 @@
           "myFgi",
           "myMeta",
           mySnap.fgi,
-          `raw=${fmt(mySnap.fgi_raw,2)} | alpha=${BASKET_ALPHA_LIVE} | weights: ${weightsSummary()} | ${new Date(mySnap.t_sec*1000).toLocaleString()}`
+          `raw=${fmt(mySnap.fgi_raw,2)} | alpha=${BASKET_ALPHA_LIVE} | basket weights fixed (BTC 50%, ETH 50%) | ${new Date(mySnap.t_sec*1000).toLocaleString()}`
         );
 
         // Update Alt tile
