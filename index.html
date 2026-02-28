@@ -504,91 +504,93 @@
     }
 
     
+    
     async function refreshEthWhalesAll() {
       if (whaleFetchInFlight) return;
       whaleFetchInFlight = true;
-      try {
-      const endMs = Date.now();
 
-      const start48 = endMs - 48*3600*1000;
+      const endMs = Date.now();
       const start12 = endMs - 12*3600*1000;
       const start24 = endMs - 24*3600*1000;
-      const start7d = endMs - 7*24*3600*1000;
+      const start48 = endMs - 48*3600*1000;
+      const start7d  = endMs - 7*24*3600*1000;
 
-      // Fast UX + accuracy:
-      // 1) Fetch 48h first and immediately render 12/24/48 from that dataset.
-      // 2) Fetch 7d in parallel and update the 7d row when finished.
-      // This keeps the short windows responsive while preserving full accuracy for all windows.
+      // Progressive, accurate loading strategy:
+      // 1) Fetch 12h first (fastest path to a real number) and render it immediately.
+      // 2) Fetch 48h + 7d in parallel. When 48h completes, derive + render 24h/48h.
+      // 3) When 7d completes, render the final 7d metrics.
+      //
+      // This minimizes "time-to-first-metric" while keeping ALL windows accurate.
 
-      // Render a "loading…" 7d row immediately.
-      renderEthWhaleWindows([
-        { label: "12h", metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null }, loading: true },
-        { label: "24h", metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null }, loading: true },
-        { label: "48h", metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null }, loading: true },
-        { label: "7d",  metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null }, loading: true },
-      ], ETH_WHALE_USD);
+      const state = {
+        "12h": { loading: true, metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null } },
+        "24h": { loading: true, metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null } },
+        "48h": { loading: true, metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null } },
+        "7d":  { loading: true, metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null } },
+      };
 
-      // Start both fetches
-      const p48 = fetchAggTradesPaged("ETHUSDT", start48, endMs);
-      const p7d = fetchAggTradesPaged("ETHUSDT", start7d, endMs);
+      const renderFromState = () => {
+        renderEthWhaleWindows([
+          { label: "12h", metrics: state["12h"].metrics, loading: state["12h"].loading },
+          { label: "24h", metrics: state["24h"].metrics, loading: state["24h"].loading },
+          { label: "48h", metrics: state["48h"].metrics, loading: state["48h"].loading },
+          { label: "7d",  metrics: state["7d"].metrics,  loading: state["7d"].loading  },
+        ], ETH_WHALE_USD);
+      };
 
-      // As soon as 48h is ready, render 12/24/48
-      let agg48 = null;
       try {
-        agg48 = await p48;
+        renderFromState();
 
-        const agg12 = agg48.filter(t => t.T >= start12);
-        const agg24 = agg48.filter(t => t.T >= start24);
-
-        const rowsPartial = [
-          { label: "12h", metrics: computeWhaleMetricsLite(agg12, ETH_WHALE_USD), loading: false },
-          { label: "24h", metrics: computeWhaleMetricsLite(agg24, ETH_WHALE_USD), loading: false },
-          { label: "48h", metrics: computeWhaleMetricsLite(agg48, ETH_WHALE_USD), loading: false },
-          { label: "7d",  metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null }, loading: true },
-        ];
-        renderEthWhaleWindows(rowsPartial, ETH_WHALE_USD);
-      } catch (e) {
-        const foot = document.getElementById("ethWhaleFooter");
-        if (foot) foot.textContent = `ETH whale (48h) fetch failed: ${String(e.message || e)}`;
-      }
-
-      // When 7d finishes, render all rows (re-using 48h if we have it)
-      try {
-        const agg7d = await p7d;
-
-        let agg12 = [];
-        let agg24 = [];
-        let agg48_forAll = [];
-
-        if (agg48) {
-          agg48_forAll = agg48;
-          agg12 = agg48.filter(t => t.T >= start12);
-          agg24 = agg48.filter(t => t.T >= start24);
-        } else {
-          // Fallback if 48h fetch failed: compute 12/24/48 from the 7d dataset.
-          agg48_forAll = agg7d.filter(t => t.T >= start48);
-          agg12 = agg7d.filter(t => t.T >= start12);
-          agg24 = agg7d.filter(t => t.T >= start24);
+        // --- Stage 1: 12h ---
+        try {
+          const agg12 = await fetchAggTradesPaged("ETHUSDT", start12, endMs);
+          state["12h"].metrics = computeWhaleMetricsLite(agg12, ETH_WHALE_USD);
+          state["12h"].loading = false;
+          renderFromState();
+        } catch (e) {
+          const foot = document.getElementById("ethWhaleFooter");
+          if (foot) foot.textContent = `ETH whale (12h) fetch failed: ${String(e.message || e)}`;
         }
 
-        const rows = [
-          { label: "12h", metrics: computeWhaleMetricsLite(agg12, ETH_WHALE_USD), loading: false },
-          { label: "24h", metrics: computeWhaleMetricsLite(agg24, ETH_WHALE_USD), loading: false },
-          { label: "48h", metrics: computeWhaleMetricsLite(agg48_forAll, ETH_WHALE_USD), loading: false },
-          { label: "7d",  metrics: computeWhaleMetricsLite(agg7d, ETH_WHALE_USD), loading: false },
-        ];
+        // --- Stage 2: 48h + 7d in parallel ---
+        const p48 = fetchAggTradesPaged("ETHUSDT", start48, endMs);
+        const p7d = fetchAggTradesPaged("ETHUSDT", start7d, endMs);
 
-        renderEthWhaleWindows(rows, ETH_WHALE_USD);
-      } catch (e) {
-        const foot = document.getElementById("ethWhaleFooter");
-        if (foot) foot.textContent = `ETH whale (7d) fetch failed: ${String(e.message || e)}`;
+        // 48h -> derive 24h/48h
+        try {
+          const agg48 = await p48;
+          const agg24 = agg48.filter(t => t.T >= start24);
+
+          state["24h"].metrics = computeWhaleMetricsLite(agg24, ETH_WHALE_USD);
+          state["48h"].metrics = computeWhaleMetricsLite(agg48, ETH_WHALE_USD);
+          state["24h"].loading = false;
+          state["48h"].loading = false;
+
+          renderFromState();
+        } catch (e) {
+          const foot = document.getElementById("ethWhaleFooter");
+          if (foot) foot.textContent = `ETH whale (48h/24h) fetch failed: ${String(e.message || e)}`;
+        }
+
+        // 7d -> final row
+        try {
+          const agg7d = await p7d;
+          state["7d"].metrics = computeWhaleMetricsLite(agg7d, ETH_WHALE_USD);
+          state["7d"].loading = false;
+          renderFromState();
+        } catch (e) {
+          const foot = document.getElementById("ethWhaleFooter");
+          if (foot) foot.textContent = `ETH whale (7d) fetch failed: ${String(e.message || e)}`;
+        }
+
+      } finally {
+        whaleFetchInFlight = false;
       }
-      }
-      finally { whaleFetchInFlight = false; }
     }
 
 
     // ============================
+
     // BINANCE REST
     // ============================
     async function fetchKlines(symbol, interval, startMs, endMs, limit=1000) {
