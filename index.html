@@ -248,6 +248,8 @@
     // Whale threshold (fixed)
     const ETH_WHALE_USD = 50000;
 
+    let whaleFetchInFlight = false;
+
     // MyFGI params (seconds)
     const P = {
       mom_short_s: 120,
@@ -364,9 +366,15 @@
       return x.toFixed(2);
     }
 
-    async function fetchAggTradesPaged(symbol, startTimeMs, endTimeMs, hardCap=80000) {
-      // Binance limit=1000; paginate using "fromId".
-      // First call by time to get a starting aggTradeId, then walk forward by fromId.
+    
+    async function fetchAggTradesPaged(symbol, startTimeMs, endTimeMs) {
+      // Accurate full-range fetch (no sampling/caps):
+      // - Find initial page by time window
+      // - Walk forward using fromId until we pass endTimeMs
+      // Notes:
+      // - This can be slow for long windows (e.g., 7d) because Binance returns max 1000 aggTrades per call.
+      // - We intentionally do NOT hard-cap results to preserve accuracy.
+
       const limit = 1000;
 
       const u0 = new URL(ETH_AGGTRADES_URL);
@@ -380,13 +388,15 @@
       const firstBatch = await r0.json();
       if (!Array.isArray(firstBatch) || firstBatch.length === 0) return [];
 
-      let out = [];
-      out.push(...firstBatch);
+      const out = [];
+      for (const t of firstBatch) {
+        if (t.T >= startTimeMs && t.T <= endTimeMs) out.push(t);
+      }
 
       let fromId = firstBatch[firstBatch.length - 1].a + 1;
       let guard = 0;
 
-      while (guard < 300 && out.length < hardCap) {
+      while (guard < 5000) {
         guard++;
 
         const u = new URL(ETH_AGGTRADES_URL);
@@ -395,16 +405,15 @@
         u.searchParams.set("limit", String(limit));
 
         const res = await fetch(u.toString());
-        if (!res.ok) break;
+        if (!res.ok) throw new Error(`aggTrades page fetch failed ${res.status}`);
 
         const batch = await res.json();
         if (!Array.isArray(batch) || batch.length === 0) break;
 
         for (const t of batch) {
           if (t.T < startTimeMs) continue;
-          if (t.T > endTimeMs) { guard = 9999; break; }
+          if (t.T > endTimeMs) return out;
           out.push(t);
-          if (out.length >= hardCap) break;
         }
 
         const last = batch[batch.length - 1];
@@ -414,7 +423,7 @@
         if (batch.length < limit) break;
       }
 
-      return out.filter(t => t.T >= startTimeMs && t.T <= endTimeMs);
+      return out;
     }
 
     function computeWhaleMetricsLite(aggTrades, whaleUsd) {
@@ -449,6 +458,7 @@
       return { count, buyNotional, sellNotional, net, maxTrade };
     }
 
+    
     function renderEthWhaleWindows(rows, whaleUsd) {
       const meta = document.getElementById("ethWhaleMeta");
       const tbody = document.getElementById("ethWhaleWindows");
@@ -468,38 +478,113 @@
           ? `${fmtKMG(r.metrics.maxTrade.notional)} (${r.metrics.maxTrade.side} @ ${fmt(r.metrics.maxTrade.price,2)} | ${fmt(r.metrics.maxTrade.qty,3)} ETH)`
           : "--";
 
+        const countTxt = (r.loading)
+          ? `<span class="small muted">loading…</span>`
+          : `${r.metrics.count}`;
+
+        const netTxt = (r.loading)
+          ? `<span class="small muted">loading…</span>`
+          : `<span style="color:${netColor}; font-weight:700;">${fmtKMG(r.metrics.net)}</span>`;
+
+        const maxCell = (r.loading)
+          ? `<span class="small muted">loading…</span>`
+          : `${maxTxt}`;
+
         tr.innerHTML =
           `<td><b>${r.label}</b></td>` +
-          `<td>${r.metrics.count}${r.capped ? " <span class='small muted'>(capped)</span>" : ""}</td>` +
-          `<td style="color:${netColor}; font-weight:700;">${fmtKMG(r.metrics.net)}</td>` +
-          `<td>${maxTxt}</td>`;
+          `<td>${countTxt}</td>` +
+          `<td>${netTxt}</td>` +
+          `<td>${maxCell}</td>`;
 
         tbody.appendChild(tr);
       }
 
       footer.textContent =
-        `Net aggressive = (aggressive buy notional) − (aggressive sell notional) from Binance ETHUSDT aggTrades. “capped” means the sample hit the safety limit.`;
+        `Net aggressive = (aggressive buy notional) − (aggressive sell notional) from Binance ETHUSDT aggTrades.`;
     }
 
+    
     async function refreshEthWhalesAll() {
+      if (whaleFetchInFlight) return;
+      whaleFetchInFlight = true;
+      try {
       const endMs = Date.now();
-      const windows = [
-        { label: "12h", ms: 12*3600*1000, cap: 90000 },
-        { label: "24h", ms: 24*3600*1000, cap: 120000 },
-        { label: "48h", ms: 48*3600*1000, cap: 160000 },
-        { label: "7d",  ms: 7*24*3600*1000, cap: 220000 },
-      ];
 
-      const rows = [];
-      for (const w of windows) {
-        const startMs = endMs - w.ms;
-        const agg = await fetchAggTradesPaged("ETHUSDT", startMs, endMs, w.cap);
-        const capped = agg.length >= w.cap;
-        const metrics = computeWhaleMetricsLite(agg, ETH_WHALE_USD);
-        rows.push({ label: w.label, metrics, capped });
+      const start48 = endMs - 48*3600*1000;
+      const start12 = endMs - 12*3600*1000;
+      const start24 = endMs - 24*3600*1000;
+      const start7d = endMs - 7*24*3600*1000;
+
+      // Fast UX + accuracy:
+      // 1) Fetch 48h first and immediately render 12/24/48 from that dataset.
+      // 2) Fetch 7d in parallel and update the 7d row when finished.
+      // This keeps the short windows responsive while preserving full accuracy for all windows.
+
+      // Render a "loading…" 7d row immediately.
+      renderEthWhaleWindows([
+        { label: "12h", metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null }, loading: true },
+        { label: "24h", metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null }, loading: true },
+        { label: "48h", metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null }, loading: true },
+        { label: "7d",  metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null }, loading: true },
+      ], ETH_WHALE_USD);
+
+      // Start both fetches
+      const p48 = fetchAggTradesPaged("ETHUSDT", start48, endMs);
+      const p7d = fetchAggTradesPaged("ETHUSDT", start7d, endMs);
+
+      // As soon as 48h is ready, render 12/24/48
+      let agg48 = null;
+      try {
+        agg48 = await p48;
+
+        const agg12 = agg48.filter(t => t.T >= start12);
+        const agg24 = agg48.filter(t => t.T >= start24);
+
+        const rowsPartial = [
+          { label: "12h", metrics: computeWhaleMetricsLite(agg12, ETH_WHALE_USD), loading: false },
+          { label: "24h", metrics: computeWhaleMetricsLite(agg24, ETH_WHALE_USD), loading: false },
+          { label: "48h", metrics: computeWhaleMetricsLite(agg48, ETH_WHALE_USD), loading: false },
+          { label: "7d",  metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null }, loading: true },
+        ];
+        renderEthWhaleWindows(rowsPartial, ETH_WHALE_USD);
+      } catch (e) {
+        const foot = document.getElementById("ethWhaleFooter");
+        if (foot) foot.textContent = `ETH whale (48h) fetch failed: ${String(e.message || e)}`;
       }
 
-      renderEthWhaleWindows(rows, ETH_WHALE_USD);
+      // When 7d finishes, render all rows (re-using 48h if we have it)
+      try {
+        const agg7d = await p7d;
+
+        let agg12 = [];
+        let agg24 = [];
+        let agg48_forAll = [];
+
+        if (agg48) {
+          agg48_forAll = agg48;
+          agg12 = agg48.filter(t => t.T >= start12);
+          agg24 = agg48.filter(t => t.T >= start24);
+        } else {
+          // Fallback if 48h fetch failed: compute 12/24/48 from the 7d dataset.
+          agg48_forAll = agg7d.filter(t => t.T >= start48);
+          agg12 = agg7d.filter(t => t.T >= start12);
+          agg24 = agg7d.filter(t => t.T >= start24);
+        }
+
+        const rows = [
+          { label: "12h", metrics: computeWhaleMetricsLite(agg12, ETH_WHALE_USD), loading: false },
+          { label: "24h", metrics: computeWhaleMetricsLite(agg24, ETH_WHALE_USD), loading: false },
+          { label: "48h", metrics: computeWhaleMetricsLite(agg48_forAll, ETH_WHALE_USD), loading: false },
+          { label: "7d",  metrics: computeWhaleMetricsLite(agg7d, ETH_WHALE_USD), loading: false },
+        ];
+
+        renderEthWhaleWindows(rows, ETH_WHALE_USD);
+      } catch (e) {
+        const foot = document.getElementById("ethWhaleFooter");
+        if (foot) foot.textContent = `ETH whale (7d) fetch failed: ${String(e.message || e)}`;
+      }
+      }
+      finally { whaleFetchInFlight = false; }
     }
 
 
@@ -844,11 +929,12 @@
       el.textContent = "MyFGI backfill: fetching 72h of 1m candles (BTC/ETH)…";
 
       const bySym = {};
-      for (const sym of SYMBOLS) {
-        el.textContent = `MyFGI backfill: fetching ${sym} 72h 1m…`;
-        const kl = await fetchLastNMinutes1m(sym, 72*60);
-        bySym[sym] = computeAssetFrom1m(klinesToSeries(kl));
-      }
+      // Fetch both symbols in parallel for faster load
+      const tasks = SYMBOLS.map(sym =>
+        fetchLastNMinutes1m(sym, 72*60).then(kl => [sym, computeAssetFrom1m(klinesToSeries(kl))])
+      );
+      const results = await Promise.all(tasks);
+      for (const [sym, series] of results) bySym[sym] = series;
 
       const ref = bySym[SYMBOLS[0]].t;
       const has = {};
@@ -950,10 +1036,10 @@
     }
 
     async function loadDailyClosesAll() {
-      // fetch enough for 90 days + buffer
-      for (const sym of PRICE_SYMBOLS) {
-        dailyCloses[sym] = await fetchDailyCloses(sym, 120);
-      }
+      // fetch enough for 90 days + buffer (parallel)
+      const tasks = PRICE_SYMBOLS.map(sym => fetchDailyCloses(sym, 120).then(v => [sym, v]));
+      const results = await Promise.all(tasks);
+      for (const [sym, v] of results) dailyCloses[sym] = v;
     }
 
     function getPriceNow(symbol) {
@@ -1331,41 +1417,29 @@
       initChart();
       setConn("disconnected");
 
-      try {
-        await loadDailyClosesAll();
-      } catch (e) {
-        document.getElementById("priceStats").textContent = `Daily close load failed: ${String(e.message || e)}`;
-      }
-
-      try {
-        await loadMyFgiBackfill72h();
-      } catch (e) {
-        document.getElementById("backfill").textContent = `MyFGI backfill failed: ${String(e.message || e)}`;
-      }
-
-      try {
-        await refreshAlt();
-      } catch (e) {
-        altNow = NaN;
-        altNowMeta = `Alternative.me fetch failed: ${String(e.message || e)}`;
-      }
-
+      // Connect WS immediately so live tiles start updating ASAP
       connectWS();
 
+      // Kick off slow tasks in parallel (don’t block initial render)
+      loadDailyClosesAll()
+        .catch(e => { document.getElementById("priceStats").textContent = `Daily close load failed: ${String(e.message || e)}`; });
 
-      // ETH whales: initial load + periodic refresh (12h/24h/48h/7d)
-      try {
-        await refreshEthWhalesAll();
-        // 7d window can be heavier; refresh less frequently
-        setInterval(async () => { try { await refreshEthWhalesAll(); } catch {} }, 3 * 60 * 1000);
-      } catch (e) {
-        const foot = document.getElementById("ethWhaleFooter");
-        if (foot) foot.textContent = `ETH whale fetch failed: ${String(e.message || e)}`;
-      }
+      loadMyFgiBackfill72h()
+        .catch(e => { document.getElementById("backfill").textContent = `MyFGI backfill failed: ${String(e.message || e)}`; });
 
-      setInterval(async () => {
-        try { await refreshAlt(); } catch {}
-      }, 60 * 1000);
+      refreshAlt()
+        .catch(e => { altNow = NaN; altNowMeta = `Alternative.me fetch failed: ${String(e.message || e)}`; });
+
+      // ETH whales: refresh in background (12h/24h/48h/7d)
+      refreshEthWhalesAll()
+        .catch(e => {
+          const foot = document.getElementById("ethWhaleFooter");
+          if (foot) foot.textContent = `ETH whale fetch failed: ${String(e.message || e)}`;
+        });
+
+      // periodic refreshes
+      setInterval(async () => { try { await refreshAlt(); } catch {} }, 60 * 1000);
+      setInterval(async () => { try { await refreshEthWhalesAll(); } catch {} }, 3 * 60 * 1000);
 
       setInterval(() => {
         const mySnap = computeMyFgiLiveOnce();
