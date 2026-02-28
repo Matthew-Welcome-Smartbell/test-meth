@@ -57,18 +57,19 @@
 
         <div class="row" style="margin-top:10px;">
           <div class="col tile" style="flex:1 1 260px;">
-            <div class="tileTitle">Average FGI (My + Alternative.me)</div>
-            <div id="avgFgi" class="tileVal">--</div>
-            <div id="avgMeta" class="tileMeta"></div>
-          </div>
-
-          <div class="col tile" style="flex:1 1 260px;">
             <div class="tileTitle">ETH MyFGI</div>
             <div id="myFgi" class="tileVal">--</div>
             <div id="myMeta" class="tileMeta"></div>
           </div>
 
+          
           <div class="col tile" style="flex:1 1 260px;">
+            <div class="tileTitle">Average FGI (My + Alternative.me)</div>
+            <div id="avgFgi" class="tileVal">--</div>
+            <div id="avgMeta" class="tileMeta"></div>
+          </div>
+
+<div class="col tile" style="flex:1 1 260px;">
             <div class="tileTitle">Alternative.me FGI (market-wide)</div>
             <div id="altFgi" class="tileVal">--</div>
             <div id="altMeta" class="tileMeta"></div>
@@ -192,9 +193,6 @@
     const SYMBOLS = ["ETHUSDT"];
     const WEIGHTS = { "ETHUSDT": 1.0 };
 
-    // Average FGI uses MyFGI + Alternative.me (renormalized on available sources)
-    const AVG_W_DESIRED = { my: 0.10, alt: 0.45 };
-
     const LIVE_UPDATE_EVERY_MS = 5000;
     const CHART_POINT_SECONDS = 60;
 
@@ -206,7 +204,9 @@
 
     // Alternative.me Fear & Greed (market-wide)
     const ALT_URL = "https://api.alternative.me/fng/?limit=500&format=json";
-    let altHistory = null;
+
+    // Average FGI weights (desired). We renormalize over available sources.
+    const AVG_W_DESIRED = { my: 0.10, alt: 0.45 };
     let altNow = NaN;
     let altNowMeta = "";
 
@@ -294,21 +294,22 @@
       metaEl.textContent = meta || "";
     }
 
+
     function computeAvgFgi(my, alt) {
       const wMy = Number(AVG_W_DESIRED.my || 0);
       const wAlt = Number(AVG_W_DESIRED.alt || 0);
       const hasMy = Number.isFinite(my);
       const hasAlt = Number.isFinite(alt);
+
       const sumAvail = (hasMy ? wMy : 0) + (hasAlt ? wAlt : 0);
       if (sumAvail <= 0) return { avg: NaN, meta: "avg unavailable (missing sources)" };
 
       const myN = hasMy ? (wMy / sumAvail) : 0;
       const altN = hasAlt ? (wAlt / sumAvail) : 0;
 
-      return {
-        avg: clamp(myN*my + altN*alt),
-        meta: `using renormalized weights: my=${(myN*100).toFixed(1)}% alt=${(altN*100).toFixed(1)}%`
-      };
+      const avg = clamp(myN * my + altN * alt);
+      const meta = `renormalized weights: my=${(myN*100).toFixed(1)}% alt=${(altN*100).toFixed(1)}%`;
+      return { avg, meta };
     }
 
 
@@ -338,15 +339,13 @@
       const eth = pricePack.eth;
 
       const redParts = [];
-      const p = eth.p;
+      const cond30 = (Number.isFinite(eth.p) && Number.isFinite(eth.a30) && eth.p > eth.a30 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
+      const cond60 = (Number.isFinite(eth.p) && Number.isFinite(eth.a60) && eth.p > eth.a60 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
+      const cond90 = (Number.isFinite(eth.p) && Number.isFinite(eth.a90) && eth.p > eth.a90 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
 
-      const cond30 = (Number.isFinite(p) && Number.isFinite(eth.a30) && p > eth.a30 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
-      const cond60 = (Number.isFinite(p) && Number.isFinite(eth.a60) && p > eth.a60 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
-      const cond90 = (Number.isFinite(p) && Number.isFinite(eth.a90) && p > eth.a90 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
-
-      if (cond30) redParts.push(`ETH: price > 30d avg * 1.05 AND avg FGI < 40`);
-      if (cond60) redParts.push(`ETH: price > 60d avg * 1.05 AND avg FGI < 40`);
-      if (cond90) redParts.push(`ETH: price > 90d avg * 1.05 AND avg FGI < 40`);
+      if (cond30) redParts.push("ETH: price > 30d avg * 1.05 AND avg FGI < 40");
+      if (cond60) redParts.push("ETH: price > 60d avg * 1.05 AND avg FGI < 40");
+      if (cond90) redParts.push("ETH: price > 90d avg * 1.05 AND avg FGI < 40");
 
       setWarn("warnRed", redParts.length > 0, redParts.length ? `RED WARNING: ${redParts.join(" | ")}` : "");
 
@@ -359,10 +358,8 @@
       }
       setWarn("warnY2", y2, y2 ? "WARNING: average FGI < 37 for 3+ days, possible drawdown, consider reduced leverage" : "");
     }
-      setWarn("warnY2", y2, y2 ? "WARNING: MyFGI < 37 for 3+ days, possible drawdown, consider reduced leverage" : "");
-    }
 
-    // ============================
+// ============================
     
 // ============================
 // ALTERNATIVE.ME (fast: latest only)
@@ -386,17 +383,16 @@ async function refreshAlt() {
       altNow = NaN;
       altNowMeta = "Alternative.me returned no data";
     }
-
-function computeAltDailyLast3() {
-  if (!altHistory || altHistory.length < 3) return [];
-  return altHistory.slice(-3).map(x => ({ day: dayKeyUTC(x.tSec), avg: clamp(x.value) }));
-}
-
   } catch (e) {
     altHistory = null;
     altNow = NaN;
     altNowMeta = `Alternative.me unavailable: ${String(e.message || e)}`;
   }
+}
+
+function computeAltDailyLast3() {
+  if (!altHistory || altHistory.length < 3) return [];
+  return altHistory.slice(-3).map(x => ({ day: dayKeyUTC(x.tSec), avg: clamp(x.value) }));
 }
 
 // BINANCE REST (prices + backfill)
@@ -915,82 +911,52 @@ function computeAltDailyLast3() {
     const liveStates = { "ETHUSDT": new LiveSymbolState("ETHUSDT") };
 
     // ============================
-// BINANCE WS (with endpoint fallback)
-// ============================
-let ws = null;
-let wsBackoffMs = 500;
+    // BINANCE WS
+    // ============================
+    let ws = null;
+    let wsBackoffMs = 500;
 
-// Some networks block port 9443. We rotate through known-good endpoints.
-// Binance docs list 9443 and 443; binance.vision is market-data only (fine for this page).
-const WS_BASES = [
-  "wss://stream.binance.com:9443/stream",
-  "wss://stream.binance.com:443/stream",
-  "wss://stream.binance.com/stream",
-  "wss://data-stream.binance.vision/stream"
-];
-let wsBaseIdx = 0;
+    function connectWS() {
+      const streams = [];
+      for (const sym of SYMBOLS) {
+        const s = sym.toLowerCase();
+        streams.push(`${s}@aggTrade`);
+        streams.push(`${s}@depth10@100ms`);
+      }
+      const url = `wss://stream.binance.com:9443/stream?streams=${streams.join("/")}`;
+      ws = new WebSocket(url);
 
-function buildStreamQuery() {
-  const streams = [];
-  for (const sym of SYMBOLS) {
-    const s = sym.toLowerCase();
-    streams.push(`${s}@aggTrade`);
-    streams.push(`${s}@depth10@100ms`);
-  }
-  return streams.join("/");
-}
+      ws.onopen = () => { setConn("connected"); wsBackoffMs = 500; };
+      ws.onclose = () => {
+        setConn("disconnected");
+        setTimeout(connectWS, wsBackoffMs);
+        wsBackoffMs = Math.min(15000, wsBackoffMs * 1.5);
+      };
+      ws.onerror = () => { try { ws.close(); } catch {} };
 
-function connectWS() {
-  const streamQuery = buildStreamQuery();
-  const base = WS_BASES[wsBaseIdx % WS_BASES.length];
-  const url = `${base}?streams=${streamQuery}`;
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        const stream = msg.stream || "";
+        const d = msg.data || {};
 
-  // Close any existing socket before recreating (avoids multiple concurrent attempts)
-  try { if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) ws.close(); } catch {}
+        const sym = stream.split("@")[0].toUpperCase();
+        if (!liveStates[sym]) return;
 
-  ws = new WebSocket(url);
-
-  ws.onopen = () => {
-    setConn("connected");
-    wsBackoffMs = 500;
-  };
-
-  ws.onclose = () => {
-    setConn("disconnected");
-    // Try next endpoint on each failed attempt
-    wsBaseIdx = (wsBaseIdx + 1) % WS_BASES.length;
-    setTimeout(connectWS, wsBackoffMs);
-    wsBackoffMs = Math.min(15000, wsBackoffMs * 1.5);
-  };
-
-  ws.onerror = () => {
-    // Trigger onclose() path
-    try { ws.close(); } catch {}
-  };
-
-  ws.onmessage = (ev) => {
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch { return; }
-    const stream = msg.stream || "";
-    const d = msg.data || {};
-
-    const sym = stream.split("@")[0].toUpperCase();
-    if (!liveStates[sym]) return;
-
-    if (stream.endsWith("@aggTrade")) {
-      liveStates[sym].onAggTrade(Number(d.E), Number(d.p), Number(d.q), Boolean(d.m));
-      lastTradePrice[sym] = Number(d.p);
-      return;
+        if (stream.endsWith("@aggTrade")) {
+          liveStates[sym].onAggTrade(Number(d.E), Number(d.p), Number(d.q), Boolean(d.m));
+          lastTradePrice[sym] = Number(d.p);
+          return;
+        }
+        if (stream.includes("@depth10")) {
+          liveStates[sym].onDepth10(Number(d.E), d.b || [], d.a || []);
+          return;
+        }
+      };
     }
-    if (stream.includes("@depth10")) {
-      liveStates[sym].onDepth10(Number(d.E), d.b || [], d.a || []);
-      return;
-    }
-  };
-}
 
-// ============================
-// LIVE COMPUTE + UI
+    // ============================
+    // LIVE COMPUTE + UI
     // ============================
     function updateTable(snapshotAssets) {
       const rows = document.getElementById("rows");
@@ -1277,11 +1243,13 @@ function connectWS() {
       setConn("disconnected");
 
       // Connect WS immediately
-      try { connectWS(); } catch (e) {}
+      try { connectWS();
 
-      // Alternative.me fetch (non-blocking)
-      try { refreshAlt(); } catch (e) {}
-      setInterval(() => { try { refreshAlt(); } catch (e) {} }, 60 * 1000);
+// Alternative.me fetch (non-blocking)
+refreshAlt();
+setInterval(() => { refreshAlt(); }, 60 * 1000);
+
+ } catch (e) {}
 
       // Kick off slow tasks in parallel (non-blocking)
       loadDailyClosesAll().catch(e => {
@@ -1314,16 +1282,19 @@ function connectWS() {
           `raw=${fmt(mySnap.fgi_raw,2)} | alpha=${BASKET_ALPHA_LIVE} | ${new Date(mySnap.t_sec*1000).toLocaleString()}`
         );
 
-        // Update Alternative.me tile (market-wide sentiment reference)
-        setTile("altFgi", "altMeta", altNow, altNowMeta);
+        
 
-        // Average FGI (My + Alternative.me)
-        const avgRes = computeAvgFgi(mySnap.fgi, altNow);
-        setTile("avgFgi", "avgMeta", avgRes.avg, avgRes.meta);
+// Update Alternative.me tile (market-wide sentiment reference)
+setTile("altFgi", "altMeta", altNow, altNowMeta);
 
-        const pricePack = updatePriceStatsUI();
+        // Average FGI tile
+        const avgObj = computeAvgFgi(mySnap.fgi, altNow);
+        setTile("avgFgi", "avgMeta", avgObj.avg, avgObj.meta);
 
-        // Build last-3-days average FGI series from MyFGI daily + Alternative.me daily
+
+const pricePack = updatePriceStatsUI();
+
+        // Daily series for 3+ days check (Average FGI)
         const myDaily = computeMyFgiDailyAveragesLast3Days();
         const altDaily = computeAltDailyLast3();
 
@@ -1334,13 +1305,14 @@ function connectWS() {
           o.alt = x.avg;
           byDay.set(x.day, o);
         }
-        const dailyMerged = Array.from(byDay.values()).sort((a,b)=>a.day.localeCompare(b.day));
-        const avgDaily = dailyMerged.map(d => ({ day: d.day, avg: computeAvgFgi(d.my, d.alt).avg }))
+        const avgDaily = Array.from(byDay.values())
+          .sort((a,b)=>a.day.localeCompare(b.day))
+          .map(d => ({ day: d.day, avg: computeAvgFgi(d.my, d.alt).avg }))
           .filter(x => Number.isFinite(x.avg));
 
-        evaluateWarnings(avgRes.avg, pricePack, avgDaily);
+        evaluateWarnings(avgObj.avg, pricePack, avgDaily);
 
-        updatePredictionsUI();
+updatePredictionsUI();
 
         updateTable(mySnap.assets);
 
