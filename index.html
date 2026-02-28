@@ -1247,13 +1247,11 @@ function computeAltDailyLast3() {
       setConn("disconnected");
 
       // Connect WS immediately
-      try { connectWS();
+      try { connectWS(); } catch (e) {}
 
-// Alternative.me fetch (non-blocking)
-refreshAlt();
-setInterval(() => { refreshAlt(); }, 60 * 1000);
-
- } catch (e) {}
+      // Alternative.me fetch (non-blocking)
+      try { refreshAlt(); } catch (e) {}
+      setInterval(() => { try { refreshAlt(); } catch (e) {} }, 60 * 1000);
 
       // Kick off slow tasks in parallel (non-blocking)
       loadDailyClosesAll().catch(e => {
