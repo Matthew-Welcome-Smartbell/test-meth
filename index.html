@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Live Crypto FGI (Option 1: No API Keys)</title>
+  <title>ETH MyFGI + Whale Activity (No API Keys)</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 16px; }
     .card { border: 1px solid #ddd; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
@@ -64,43 +64,25 @@
         <div class="muted small" style="margin-top:8px;">
           Binance REST: <code>/api/v3/klines</code> (1m + 1d)<br/>
           Binance WS: <code>aggTrade</code> + <code>depth10</code><br/>
-          Alternative.me: public API (no key)<br/>
+          
           This page uses <b>No API keys</b>.
         </div>
       </div>
 
       <div class="col" style="flex: 3 1 560px;">
-        <div class="muted">Fear &amp; Greed (Option 1: MyFGI + Alternative.me only)</div>
+        <div class="muted">ETH MyFGI (ETH-only)</div>
 
-        <div class="row" style="margin-top:10px;">
+                <div class="row" style="margin-top:10px;">
           <div class="col tile" style="flex:1 1 260px;">
-            <div class="tileTitle">Average FGI (renormalized: 0.10 My + 0.45 Alt)</div>
-            <div id="avgFgi" class="tileVal">--</div>
-            <div id="avgMeta" class="tileMeta"></div>
-          </div>
-
-          <div class="col tile" style="flex:1 1 220px;">
-            <div class="tileTitle">MyFGI (BTC/ETH basket)</div>
+            <div class="tileTitle">ETH MyFGI</div>
             <div id="myFgi" class="tileVal">--</div>
             <div id="myMeta" class="tileMeta"></div>
           </div>
-
-          <div class="col tile" style="flex:1 1 220px;">
-            <div class="tileTitle">Alternative.me FGI</div>
-            <div id="altFgi" class="tileVal">--</div>
-            <div id="altMeta" class="tileMeta"></div>
-          </div>
         </div>
 
-        <div id="priceStats" class="muted small" style="margin-top:10px;"></div>
+<div id="priceStats" class="muted small" style="margin-top:10px;"></div>
 
         <!-- RESTORED: Price prediction outputs -->
-        <div class="predRow">
-          <div class="predBox">
-            <div class="predTitle">Predicted BTC (tomorrow / 1 week) using FGI avg windows</div>
-            <div class="predVal" id="predBTC">--</div>
-            <div class="predMeta" id="predBTCMeta"></div>
-          </div>
           <div class="predBox">
             <div class="predTitle">Predicted ETH (tomorrow / 1 week) using FGI avg windows</div>
             <div class="predVal" id="predETH">--</div>
@@ -221,19 +203,17 @@
     // ============================
     // CONFIG
     // ============================
-    const SYMBOLS = ["BTCUSDT", "ETHUSDT"];
+    const SYMBOLS = ["ETHUSDT"];
 
     // MyFGI basket weights (fixed)
-    const WEIGHTS = { "BTCUSDT": 0.50, "ETHUSDT": 0.50 };
+    const WEIGHTS = { "ETHUSDT": 1.0 };
 
     // Average weights requested previously (CoinGlass/CMC removed in Option 1).
     // We renormalize using only available sources (my + alt).
     const AVG_W_DESIRED = { my: 0.10, alt: 0.45 }; // sum=0.55; renormalize => my=0.1818 alt=0.8182
 
-    const ALT_URL = "https://api.alternative.me/fng/?limit=500&format=json";
-
     // For averages + warnings we check both BTC and ETH
-    const PRICE_SYMBOLS = ["BTCUSDT", "ETHUSDT"];
+    const PRICE_SYMBOLS = ["ETHUSDT"];
 
     const LIVE_UPDATE_EVERY_MS = 5000;
     const CHART_POINT_SECONDS = 60;
@@ -731,557 +711,8 @@
     }
 
     // ============================
-    // ALTERNATIVE.ME
-    // ============================
-    async function fetchAltFgiHistory() {
-      const res = await fetch(ALT_URL, { method: "GET" });
-      if (!res.ok) {
-        const txt = await res.text().catch(()=> "");
-        throw new Error(`Alternative.me fetch failed ${res.status}: ${txt}`);
-      }
-      const j = await res.json();
-      const arr = j?.data || [];
-      const parsed = arr
-        .map(x => ({ tSec: Number(x.timestamp), value: Number(x.value), cls: String(x.value_classification||"") }))
-        .filter(x => Number.isFinite(x.tSec) && Number.isFinite(x.value))
-        .sort((a,b)=>a.tSec-b.tSec);
-      return parsed;
-    }
 
-    // ============================
-    // LIVE WS STATE (MyFGI live)
-    // ============================
-    class Rolling1s {
-      constructor() { this.arr = []; }
-      push(t, v) { this.arr.push({t, v}); }
-      prune(cutoff) { while (this.arr.length && this.arr[0].t < cutoff) this.arr.shift(); }
-      valuesSince(cutoff) { return this.arr.filter(x => x.t >= cutoff).map(x => x.v); }
-      latest() { return this.arr.length ? this.arr[this.arr.length-1].v : null; }
-    }
 
-    class LiveSymbolState {
-      constructor(symbol) {
-        this.symbol = symbol;
-        this.prices = new Rolling1s();
-        this.rets = new Rolling1s();
-        this.buy1s = new Rolling1s();
-        this.sell1s = new Rolling1s();
-        this.imb = new Rolling1s();
-
-        this.curSec = null;
-        this.curPrice = null;
-        this.curBuy = 0;
-        this.curSell = 0;
-
-        this._lastRetPrice = null;
-        this.lastPrice = null;
-      }
-
-      keepSec() {
-        return Math.max(P.mom_long_s, P.vol_long_s, P.aggr_window_s, P.imb_window_s, 600) + 60;
-      }
-
-      prune(nowSec) {
-        const cutoff = nowSec - this.keepSec();
-        this.prices.prune(cutoff);
-        this.rets.prune(cutoff);
-        this.buy1s.prune(cutoff);
-        this.sell1s.prune(cutoff);
-        this.imb.prune(nowSec - (P.imb_window_s + 120));
-      }
-
-      flushSecond(sec, price, buyQty, sellQty) {
-        this.prices.push(sec, price);
-        if (this._lastRetPrice != null && this._lastRetPrice > 0 && price > 0) {
-          this.rets.push(sec, Math.log(price / (this._lastRetPrice + EPS)));
-        }
-        this._lastRetPrice = price;
-
-        this.buy1s.push(sec, buyQty);
-        this.sell1s.push(sec, sellQty);
-      }
-
-      onAggTrade(eventMs, price, qty, isBuyerMaker) {
-        const sec = Math.floor(eventMs / 1000);
-        price = Number(price); qty = Number(qty);
-        this.lastPrice = price;
-
-        if (this.curSec === null) {
-          this.curSec = sec;
-          this.curPrice = price;
-          this.curBuy = 0; this.curSell = 0;
-        }
-
-        if (sec === this.curSec) {
-          this.curPrice = price;
-          if (isBuyerMaker) this.curSell += qty; else this.curBuy += qty;
-          return;
-        }
-
-        this.flushSecond(this.curSec, Number(this.curPrice ?? price), this.curBuy, this.curSell);
-
-        const gap = sec - this.curSec;
-        const fillMax = 30;
-        if (gap > 1) {
-          const lastP = Number(this.curPrice ?? price);
-          const fillTo = Math.min(sec - 1, this.curSec + fillMax);
-          for (let s=this.curSec + 1; s<=fillTo; s++) this.flushSecond(s, lastP, 0, 0);
-        }
-
-        this.curSec = sec;
-        this.curPrice = price;
-        this.curBuy = 0; this.curSell = 0;
-        if (isBuyerMaker) this.curSell += qty; else this.curBuy += qty;
-
-        this.prune(sec);
-      }
-
-      onDepth10(eventMs, bids, asks) {
-        const sec = Math.floor(eventMs / 1000);
-        let sumB = 0, sumA = 0;
-        for (let i=0; i<Math.min(10, bids.length); i++) sumB += Number(bids[i][1]);
-        for (let i=0; i<Math.min(10, asks.length); i++) sumA += Number(asks[i][1]);
-        const imb = (sumB - sumA) / (sumB + sumA + EPS);
-        this.imb.push(sec, imb);
-        this.prune(sec);
-      }
-
-      priceAtOrAfter(targetSec) {
-        for (const x of this.prices.arr) { if (x.t >= targetSec) return x.v; }
-        return null;
-      }
-
-      compute(nowSec) {
-        this.prune(nowSec);
-
-        const pNow = this.prices.latest();
-        if (!(pNow > 0)) return null;
-
-        const pS = this.priceAtOrAfter(nowSec - P.mom_short_s);
-        if (!(pS > 0)) return null;
-
-        const rS = Math.log(pNow / (pS + EPS));
-        const momS = tanhScoreSigned(rS, P.k_m_short);
-
-        let mom = momS;
-        const pL = this.priceAtOrAfter(nowSec - P.mom_long_s);
-        if (pL && pL > 0) {
-          const rL = Math.log(pNow / (pL + EPS));
-          const momL = tanhScoreSigned(rL, P.k_m_long);
-          const a = clamp(P.mom_blend_short, 0, 1);
-          mom = a * momS + (1 - a) * momL;
-        }
-
-        const retsS = this.rets.valuesSince(nowSec - P.vol_short_s);
-        const volS = std(retsS);
-        const volSScore = tanhScoreNegative(volS, P.k_v_short);
-
-        const retsL = this.rets.valuesSince(nowSec - P.vol_long_s);
-        const volL = retsL.length ? std(retsL) : volS;
-        const volLScore = tanhScoreNegative(volL, P.k_v_long);
-
-        const aV = clamp(P.vol_blend_short, 0, 1);
-        const vol = aV * volSScore + (1 - aV) * volLScore;
-
-        const imbs = this.imb.valuesSince(nowSec - P.imb_window_s);
-        let ob = 50;
-        if (imbs.length) {
-          const mean = imbs.reduce((a,b)=>a+b,0) / imbs.length;
-          ob = clamp(50 + 50 * mean);
-        }
-
-        const buys = this.buy1s.valuesSince(nowSec - P.aggr_window_s);
-        const sells = this.sell1s.valuesSince(nowSec - P.aggr_window_s);
-        const bSum = buys.reduce((a,b)=>a+b,0);
-        const sSum = sells.reduce((a,b)=>a+b,0);
-        const aggr = (bSum + sSum > 0) ? clamp(100 * (bSum / (bSum + sSum + EPS))) : 50;
-
-        const asset = clamp(P.w_mom*mom + P.w_vol*vol + P.w_ob*ob + P.w_aggr*aggr);
-
-        return { symbol: this.symbol, t_sec: nowSec, price: pNow, mom, vol, ob, aggr, asset };
-      }
-    }
-
-    const liveStates = {};
-    for (const s of SYMBOLS) liveStates[s] = new LiveSymbolState(s);
-
-    // ============================
-    // CHART
-    // ============================
-    let chart = null;
-    function initChart() {
-      const ctx = document.getElementById("chart").getContext("2d");
-      chart = new Chart(ctx, {
-        type: "line",
-        data: { labels: [], datasets: [{ label: "MyFGI (1/min)", data: [], borderWidth: 2, pointRadius: 0, tension: 0.25 }] },
-        options: { responsive: true, animation: false, scales: { y: { min: 0, max: 100 } } }
-      });
-    }
-
-    // ============================
-    // MYFGI BACKFILL CACHE (72h)
-    // ============================
-    let backfillCache = null;
-    let myFgiSeries = [];
-    let prevBasketLive = 50.0;
-    let lastChartMinute = null;
-
-    async function loadMyFgiBackfill72h() {
-      const el = document.getElementById("backfill");
-      el.textContent = "MyFGI backfill: fetching 72h of 1m candles (BTC/ETH)…";
-
-      const bySym = {};
-      // Fetch both symbols in parallel for faster load
-      const tasks = SYMBOLS.map(sym =>
-        fetchLastNMinutes1m(sym, 72*60).then(kl => [sym, computeAssetFrom1m(klinesToSeries(kl))])
-      );
-      const results = await Promise.all(tasks);
-      for (const [sym, series] of results) bySym[sym] = series;
-
-      const ref = bySym[SYMBOLS[0]].t;
-      const has = {};
-      for (const sym of SYMBOLS) has[sym] = new Set(bySym[sym].t);
-      const commonT = ref.filter(ts => SYMBOLS.every(sym => has[sym].has(ts)));
-
-      if (!commonT.length) {
-        el.textContent = "MyFGI backfill: no overlapping timestamps across symbols.";
-        backfillCache = null;
-        return;
-      }
-
-      const idx = {};
-      for (const sym of SYMBOLS) {
-        idx[sym] = new Map();
-        bySym[sym].t.forEach((ts, i) => idx[sym].set(ts, i));
-      }
-
-      backfillCache = { commonT, idx, bySym };
-      el.textContent = `MyFGI backfill: cache ready (${commonT.length} minutes). Rendering MyFGI…`;
-
-      recomputeMyFgiFromCache();
-    }
-
-    function recomputeMyFgiFromCache() {
-      const el = document.getElementById("backfill");
-      if (!backfillCache) { el.textContent = "MyFGI backfill: cache not ready."; return; }
-
-      const { commonT, idx, bySym } = backfillCache;
-
-      const out = [];
-      let prev = 50.0;
-
-      for (const ts of commonT) {
-        let total = 0, used = 0;
-        for (const sym of SYMBOLS) {
-          const i = idx[sym].get(ts);
-          const a = bySym[sym].asset[i];
-          const w = Number(WEIGHTS[sym] || 0);
-          if (Number.isFinite(a) && w > 0) { total += w * a; used += w; }
-        }
-        if (used <= 0) continue;
-
-        const fgiRaw = clamp(total / (used + EPS));
-        const fgi = clamp(ALPHA_BACKFILL * fgiRaw + (1 - ALPHA_BACKFILL) * prev);
-        prev = fgi;
-        out.push({ t_sec: ts, fgi_raw: fgiRaw, fgi });
-      }
-
-      myFgiSeries = out;
-
-      const maxPts = 24*60;
-      const slice = myFgiSeries.slice(-maxPts);
-
-      chart.data.labels = [];
-      chart.data.datasets[0].data = [];
-      for (const p of slice) {
-        chart.data.labels.push(new Date(p.t_sec*1000).toLocaleTimeString());
-        chart.data.datasets[0].data.push(p.fgi);
-      }
-      chart.update("none");
-
-      if (myFgiSeries.length) prevBasketLive = myFgiSeries[myFgiSeries.length-1].fgi;
-
-      const stats = update24hStatsFromChart(chart);
-      el.textContent =
-        `MyFGI backfill: rendered ${slice.length} pts (24h). 24h high=${fmt(stats.hi)} low=${fmt(stats.lo)} avg=${fmt(stats.avg)}.`;
-    }
-
-    function computeMyFgiDailyAveragesLast3Days() {
-      const map = new Map();
-      for (const p of myFgiSeries) {
-        const k = dayKeyUTC(p.t_sec);
-        if (!map.has(k)) map.set(k, { sum: 0, n: 0 });
-        const o = map.get(k);
-        if (Number.isFinite(p.fgi)) { o.sum += p.fgi; o.n += 1; }
-      }
-      const days = Array.from(map.entries())
-        .map(([k,v]) => ({ day: k, avg: (v.n ? v.sum/v.n : NaN) }))
-        .filter(x => Number.isFinite(x.avg))
-        .sort((a,b)=> a.day.localeCompare(b.day));
-
-      return days.slice(-3);
-    }
-
-    // ============================
-    // PRICE AVERAGES (BTC + ETH)
-    // ============================
-    let dailyCloses = { "BTCUSDT": null, "ETHUSDT": null }; // each: [{tSec, close}]
-    let lastTradePrice = { "BTCUSDT": null, "ETHUSDT": null };
-
-    function avgLastNCloses(symbol, n) {
-      const s = dailyCloses[symbol];
-      if (!s || s.length < n) return null;
-      const arr = s.slice(-n).map(x => x.close).filter(v => Number.isFinite(v));
-      if (arr.length < n) return null;
-      const sum = arr.reduce((a,b)=>a+b,0);
-      return sum / arr.length;
-    }
-
-    async function loadDailyClosesAll() {
-      // fetch enough for 90 days + buffer (parallel)
-      const tasks = PRICE_SYMBOLS.map(sym => fetchDailyCloses(sym, 120).then(v => [sym, v]));
-      const results = await Promise.all(tasks);
-      for (const [sym, v] of results) dailyCloses[sym] = v;
-    }
-
-    function getPriceNow(symbol) {
-      return (lastTradePrice[symbol] != null)
-        ? lastTradePrice[symbol]
-        : (dailyCloses[symbol]?.length ? dailyCloses[symbol][dailyCloses[symbol].length-1].close : null);
-    }
-
-    function updatePriceStatsUI() {
-      const btc = {
-        p: getPriceNow("BTCUSDT"),
-        a7: avgLastNCloses("BTCUSDT", 7),
-        a30: avgLastNCloses("BTCUSDT", 30),
-        a60: avgLastNCloses("BTCUSDT", 60),
-        a90: avgLastNCloses("BTCUSDT", 90),
-      };
-      const eth = {
-        p: getPriceNow("ETHUSDT"),
-        a7: avgLastNCloses("ETHUSDT", 7),
-        a30: avgLastNCloses("ETHUSDT", 30),
-        a60: avgLastNCloses("ETHUSDT", 60),
-        a90: avgLastNCloses("ETHUSDT", 90),
-      };
-
-      document.getElementById("priceStats").textContent =
-        `BTC price=${fmt(btc.p,2)} | 7d avg=${fmt(btc.a7,2)} | 30d avg=${fmt(btc.a30,2)} | 60d avg=${fmt(btc.a60,2)} | 90d avg=${fmt(btc.a90,2)}   ||   ` +
-        `ETH price=${fmt(eth.p,2)} | 7d avg=${fmt(eth.a7,2)} | 30d avg=${fmt(eth.a30,2)} | 60d avg=${fmt(eth.a60,2)} | 90d avg=${fmt(eth.a90,2)}`;
-
-      return { btc, eth };
-    }
-
-    // ============================
-    // AVERAGE FGI (Option 1: My + Alt only)
-    // ============================
-    function computeAvgFgi(my, alt) {
-      const wMy = Number(AVG_W_DESIRED.my || 0);
-      const wAlt = Number(AVG_W_DESIRED.alt || 0);
-
-      const hasMy = Number.isFinite(my);
-      const hasAlt = Number.isFinite(alt);
-
-      const sumAvail = (hasMy ? wMy : 0) + (hasAlt ? wAlt : 0);
-      if (sumAvail <= 0) return { avg: NaN, meta: "avg unavailable (missing sources)" };
-
-      const myN = hasMy ? (wMy / sumAvail) : 0;
-      const altN = hasAlt ? (wAlt / sumAvail) : 0;
-
-      const avg = clamp(myN*my + altN*alt);
-      const meta = `using renormalized weights: my=${(myN*100).toFixed(1)}% alt=${(altN*100).toFixed(1)}%`;
-      return { avg, meta };
-    }
-
-    // ============================
-    // WARNINGS
-    // ============================
-    function setWarn(id, show, msg) {
-      const el = document.getElementById(id);
-      if (!show) { el.style.display = "none"; el.textContent = ""; return; }
-      el.style.display = "block";
-      el.textContent = msg;
-    }
-
-    function evaluateWarnings(avgFgiNow, pricePack, avgFgiDailyLast3) {
-      const btc = pricePack.btc;
-      const eth = pricePack.eth;
-
-      const parts = [];
-
-      function addRedFor(symbolName, p, a30, a60, a90) {
-        const cond30 = (Number.isFinite(p) && Number.isFinite(a30) && p > a30 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
-        const cond60 = (Number.isFinite(p) && Number.isFinite(a60) && p > a60 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
-        const cond90 = (Number.isFinite(p) && Number.isFinite(a90) && p > a90 * 1.05 && Number.isFinite(avgFgiNow) && avgFgiNow < 40);
-
-        if (cond30) parts.push(`${symbolName}: price > 30d avg * 1.05 AND avg FGI < 40`);
-        if (cond60) parts.push(`${symbolName}: price > 60d avg * 1.05 AND avg FGI < 40`);
-        if (cond90) parts.push(`${symbolName}: price > 90d avg * 1.05 AND avg FGI < 40`);
-      }
-
-      addRedFor("BTC", btc.p, btc.a30, btc.a60, btc.a90);
-      addRedFor("ETH", eth.p, eth.a30, eth.a60, eth.a90);
-
-      setWarn("warnRed", parts.length > 0, parts.length ? `RED WARNING: ${parts.join(" | ")}` : "");
-
-      const y1 = (Number.isFinite(avgFgiNow) && avgFgiNow > 50);
-      setWarn("warnY1", y1, y1 ? "WARNING: average FGI > 50, use reduced leverage" : "");
-
-      let y2 = false;
-      if (avgFgiDailyLast3 && avgFgiDailyLast3.length >= 3) {
-        y2 = avgFgiDailyLast3.slice(-3).every(x => Number.isFinite(x.avg) && x.avg < 37);
-      }
-      setWarn("warnY2", y2, y2 ? "WARNING: FGI < 37 for 3 or more days, possible drawdown, use reduced leverage" : "");
-    }
-
-    // ============================
-    // RESTORED: PRICE PREDICTIONS (k_fit * K_MULT) USING AVG FGI 2D/7D
-    // ============================
-    function centeredFgi(v) {
-      return Number.isFinite(v) ? (Number(v) - 50.0) : NaN;
-    }
-
-    function mean(arr) {
-      const xs = arr.filter(x => Number.isFinite(x));
-      if (!xs.length) return NaN;
-      return xs.reduce((a,b)=>a+b,0) / xs.length;
-    }
-
-    // Fit k (no intercept) for dP ≈ k*(FGI-50)*dt over daily history
-    function fitKLeastSquares(priceSeries, fgiSeries) {
-      // priceSeries: [{tSec, close}] daily close
-      // fgiSeries: Map dayKey -> fgi (0..100) (we'll align using dayKeyUTC)
-      if (!priceSeries || priceSeries.length < 10) return NaN;
-
-      let prev = null;
-      const x = [];
-      const y = [];
-
-      for (const row of priceSeries) {
-        const day = dayKeyUTC(row.tSec);
-        const fgi = fgiSeries.get(day);
-        if (!Number.isFinite(fgi)) { prev = row.close; continue; }
-        if (prev == null || !Number.isFinite(prev) || !Number.isFinite(row.close)) { prev = row.close; continue; }
-
-        const dP = row.close - prev;
-        const fc = centeredFgi(fgi); // (FGI-50)
-        x.push(fc);
-        y.push(dP);
-
-        prev = row.close;
-      }
-
-      if (x.length < 10) return NaN;
-
-      let denom = 0, numer = 0;
-      for (let i=0; i<x.length; i++) {
-        denom += x[i]*x[i];
-        numer += x[i]*y[i];
-      }
-      if (denom <= 0) return NaN;
-      return numer / denom;
-    }
-
-    function buildDailyAvgFgiSeries(myFgiSeriesMinutes, altHistoryDaily) {
-      const myByDay = new Map();
-      for (const p of (myFgiSeriesMinutes || [])) {
-        const day = dayKeyUTC(p.t_sec);
-        const o = myByDay.get(day) || { sum:0, n:0 };
-        if (Number.isFinite(p.fgi)) { o.sum += p.fgi; o.n += 1; }
-        myByDay.set(day, o);
-      }
-      const myAvg = new Map();
-      for (const [day, o] of myByDay.entries()) {
-        if (o.n) myAvg.set(day, o.sum/o.n);
-      }
-
-      const altMap = new Map();
-      for (const a of (altHistoryDaily || [])) {
-        const day = dayKeyUTC(a.tSec);
-        if (Number.isFinite(a.value)) altMap.set(day, clamp(a.value));
-      }
-
-      const days = new Set([...myAvg.keys(), ...altMap.keys()]);
-      const out = new Map();
-      for (const day of days) {
-        const my = myAvg.has(day) ? myAvg.get(day) : NaN;
-        const alt = altMap.has(day) ? altMap.get(day) : NaN;
-        const r = computeAvgFgi(my, alt);
-        if (Number.isFinite(r.avg)) out.set(day, r.avg);
-      }
-      return out;
-    }
-
-    function computePredictions(avgFgiDailyMap, symbol) {
-      const closes = dailyCloses[symbol];
-      if (!closes || closes.length < 30 || !avgFgiDailyMap) {
-        return { ok:false, msg:"insufficient data" };
-      }
-
-      const k_fit = fitKLeastSquares(closes, avgFgiDailyMap);
-      const k_used = (Number.isFinite(k_fit) ? k_fit : 0) * Number(K_MULT);
-
-      const daysSorted = Array.from(avgFgiDailyMap.keys()).sort();
-      if (!daysSorted.length) return { ok:false, msg:"no daily avg fgi" };
-
-      const lastDays = daysSorted.slice(-14);
-      const vals = lastDays.map(d => avgFgiDailyMap.get(d));
-
-      const fgi2 = mean(vals.slice(-2));
-      const fgi7 = mean(vals.slice(-7));
-
-      const p0 = getPriceNow(symbol);
-      if (!Number.isFinite(p0)) return { ok:false, msg:"no current price" };
-
-      const fc2 = centeredFgi(fgi2);
-      const fc7 = centeredFgi(fgi7);
-
-      const p_tom_2 = p0 + k_used * fc2 * 1.0;
-      const p_tom_7 = p0 + k_used * fc7 * 1.0;
-      const p_wk_2  = p0 + k_used * fc2 * 7.0;
-      const p_wk_7  = p0 + k_used * fc7 * 7.0;
-
-      return {
-        ok: true,
-        k_fit,
-        k_used,
-        fgi2,
-        fgi7,
-        p0,
-        p_tom_2, p_tom_7,
-        p_wk_2,  p_wk_7,
-      };
-    }
-
-    function updatePredictionsUI(avgFgiDailyMap) {
-      const btc = computePredictions(avgFgiDailyMap, "BTCUSDT");
-      const eth = computePredictions(avgFgiDailyMap, "ETHUSDT");
-
-      if (btc.ok) {
-        document.getElementById("predBTC").textContent =
-          `Tomorrow: (2d FGI) ${fmt(btc.p_tom_2,2)} | (7d FGI) ${fmt(btc.p_tom_7,2)}   ||   ` +
-          `1 week: (2d FGI) ${fmt(btc.p_wk_2,2)} | (7d FGI) ${fmt(btc.p_wk_7,2)}`;
-        document.getElementById("predBTCMeta").textContent =
-          `BTC p0=${fmt(btc.p0,2)} | FGI2=${fmt(btc.fgi2,2)} FGI7=${fmt(btc.fgi7,2)} | k_fit=${fmt(btc.k_fit,6)} | K_MULT=${K_MULT} | k_used=${fmt(btc.k_used,6)}`;
-      } else {
-        document.getElementById("predBTC").textContent = "--";
-        document.getElementById("predBTCMeta").textContent = `BTC prediction unavailable: ${btc.msg || "unknown"}`;
-      }
-
-      if (eth.ok) {
-        document.getElementById("predETH").textContent =
-          `Tomorrow: (2d FGI) ${fmt(eth.p_tom_2,2)} | (7d FGI) ${fmt(eth.p_tom_7,2)}   ||   ` +
-          `1 week: (2d FGI) ${fmt(eth.p_wk_2,2)} | (7d FGI) ${fmt(eth.p_wk_7,2)}`;
-        document.getElementById("predETHMeta").textContent =
-          `ETH p0=${fmt(eth.p0,2)} | FGI2=${fmt(eth.fgi2,2)} FGI7=${fmt(eth.fgi7,2)} | k_fit=${fmt(eth.k_fit,6)} | K_MULT=${K_MULT} | k_used=${fmt(eth.k_used,6)}`;
-      } else {
-        document.getElementById("predETH").textContent = "--";
-        document.getElementById("predETHMeta").textContent = `ETH prediction unavailable: ${eth.msg || "unknown"}`;
-      }
-    }
-
-    // ============================
     // LIVE WS (Binance)
     // ============================
     let ws = null;
@@ -1316,7 +747,7 @@
 
         if (stream.endsWith("@aggTrade")) {
           liveStates[sym].onAggTrade(Number(d.E), Number(d.p), Number(d.q), Boolean(d.m));
-          if (sym === "BTCUSDT" || sym === "ETHUSDT") lastTradePrice[sym] = Number(d.p);
+          if (sym === "ETHUSDT") lastTradePrice[sym] = Number(d.p);
           return;
         }
         if (stream.includes("@depth10")) {
@@ -1392,27 +823,7 @@
     }
 
     // ============================
-    // EXTERNAL FGI STATE
-    // ============================
-    let altHistory = null;
-    let altNow = NaN;
-    let altNowMeta = "";
 
-    async function refreshAlt() {
-      altHistory = await fetchAltFgiHistory();
-      if (altHistory && altHistory.length) {
-        const last = altHistory[altHistory.length - 1];
-        altNow = clamp(last.value);
-        altNowMeta = `${last.cls || ""} | ${new Date(last.tSec*1000).toLocaleString()}`;
-      }
-    }
-
-    function computeAltDailyLast3() {
-      if (!altHistory || altHistory.length < 3) return [];
-      return altHistory.slice(-3).map(x => ({ day: dayKeyUTC(x.tSec), avg: clamp(x.value) }));
-    }
-
-    // ============================
     // BOOT
     // ============================
     (async () => {
@@ -1429,9 +840,6 @@
       loadMyFgiBackfill72h()
         .catch(e => { document.getElementById("backfill").textContent = `MyFGI backfill failed: ${String(e.message || e)}`; });
 
-      refreshAlt()
-        .catch(e => { altNow = NaN; altNowMeta = `Alternative.me fetch failed: ${String(e.message || e)}`; });
-
       // ETH whales: refresh in background (12h/24h/48h/7d)
       refreshEthWhalesAll()
         .catch(e => {
@@ -1440,7 +848,6 @@
         });
 
       // periodic refreshes
-      setInterval(async () => { try { await refreshAlt(); } catch {} }, 60 * 1000);
       setInterval(async () => { try { await refreshEthWhalesAll(); } catch {} }, 3 * 60 * 1000);
 
       setInterval(() => {
@@ -1455,37 +862,13 @@
           `raw=${fmt(mySnap.fgi_raw,2)} | alpha=${BASKET_ALPHA_LIVE} | basket weights fixed (BTC 50%, ETH 50%) | ${new Date(mySnap.t_sec*1000).toLocaleString()}`
         );
 
-        // Update Alt tile
-        setTile("altFgi", "altMeta", altNow, altNowMeta);
-
-        // Compute AVG (renormalized on available sources)
-        const { avg, meta } = computeAvgFgi(mySnap.fgi, altNow);
-        setTile("avgFgi", "avgMeta", avg, meta);
 
         // Update price stats + warnings
         const pricePack = updatePriceStatsUI();
 
-        // Daily series for 3+ days check
+        // Daily series for 3+ days check (ETH MyFGI only)
         const myDaily = computeMyFgiDailyAveragesLast3Days();
-        const altDaily = computeAltDailyLast3();
-
-        const byDay = new Map();
-        for (const x of myDaily) byDay.set(x.day, { day: x.day, my: x.avg, alt: NaN });
-        for (const x of altDaily) {
-          const o = byDay.get(x.day) || { day: x.day, my: NaN, alt: NaN };
-          o.alt = x.avg;
-          byDay.set(x.day, o);
-        }
-        const dailyMerged = Array.from(byDay.values()).sort((a,b)=>a.day.localeCompare(b.day));
-
-        const avgDaily = dailyMerged.map(d => {
-          const r = computeAvgFgi(d.my, d.alt);
-          return { day: d.day, avg: r.avg };
-        }).filter(x => Number.isFinite(x.avg));
-
-        evaluateWarnings(avg, pricePack, avgDaily);
-
-        // RESTORED: predictions (uses daily closes + daily avg fgi series)
+        evaluateWarnings(mySnap.fgi, pricePack, myDaily);
         const avgFgiDailyMap = buildDailyAvgFgiSeries(myFgiSeries, altHistory);
         updatePredictionsUI(avgFgiDailyMap);
 
@@ -1499,5 +882,4 @@
     })();
   </script>
 </body>
-
 </html>
