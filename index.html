@@ -1117,7 +1117,95 @@ function computeAltDailyLast3() {
       return { count, buyNotional, sellNotional, net, maxTrade };
     }
 
-    function renderEthWhaleWindows(rows, whaleUsd) {
+    
+    // --- 7d whale proxy (fast): top 1% 5m candles by taker notional ---
+    async function fetchKlinesLastNDays(symbol, interval, days) {
+      const endMs = Date.now();
+      const startMs = endMs - days * 24 * 3600 * 1000;
+      const limit = 1000;
+      const out = [];
+
+      // Page forward using startTime
+      let cursor = startMs;
+      let guard = 0;
+      while (cursor < endMs && guard < 10) {
+        guard++;
+        const batch = await fetchKlines(symbol, interval, cursor, endMs, limit);
+        if (!Array.isArray(batch) || batch.length === 0) break;
+        out.push(...batch);
+
+        const lastOpen = Number(batch[batch.length - 1][0]);
+        const next = lastOpen + 1;
+        if (!Number.isFinite(lastOpen) || next <= cursor) break;
+        cursor = lastOpen + 1;
+
+        if (batch.length < limit) break;
+      }
+
+      // Dedup by openTime
+      const map = new Map();
+      for (const k of out) map.set(Number(k[0]), k);
+      return Array.from(map.values()).sort((a,b)=>Number(a[0])-Number(b[0]));
+    }
+
+    function percentile(arr, p) {
+      const xs = arr.filter(x => Number.isFinite(x)).sort((a,b)=>a-b);
+      if (!xs.length) return NaN;
+      const idx = Math.max(0, Math.min(xs.length - 1, Math.floor(p * (xs.length - 1))));
+      return xs[idx];
+    }
+
+    async function fetchEth7dWhaleProxy() {
+      // Proxy definition: "whale periods" are the top 1% (P99) 5m candles by taker notional.
+      // This is NOT individual whale trades, but it tracks unusually large aggressive flow bursts quickly.
+      const kl = await fetchKlinesLastNDays("ETHUSDT", "5m", 7);
+      if (!kl.length) return { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null };
+
+      const totals = [];
+      const rows = [];
+
+      for (const k of kl) {
+        const close = Number(k[4]);
+        const volBase = Number(k[5]);
+        const takerBuyBase = Number(k[9]);
+        if (!(close > 0) || !Number.isFinite(volBase) || !Number.isFinite(takerBuyBase)) continue;
+
+        const buyNotional = takerBuyBase * close;
+        const sellNotional = Math.max(0, (volBase - takerBuyBase)) * close;
+        const totalNotional = (buyNotional + sellNotional); // ~= volBase * close
+        totals.push(totalNotional);
+        rows.push({ close, volBase, buyNotional, sellNotional, totalNotional });
+      }
+
+      const cut = percentile(totals, 0.99); // top 1%
+      if (!Number.isFinite(cut)) return { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null };
+
+      let count = 0;
+      let buySum = 0;
+      let sellSum = 0;
+      let maxNotional = 0;
+      let maxTrade = null;
+
+      for (const r of rows) {
+        if (r.totalNotional < cut) continue;
+        count++;
+        buySum += r.buyNotional;
+        sellSum += r.sellNotional;
+
+        if (r.totalNotional > maxNotional) {
+          maxNotional = r.totalNotional;
+          const net = r.buyNotional - r.sellNotional;
+          const side = (net >= 0) ? "BUYdom" : "SELLdom";
+          const qty = (r.volBase > 0) ? r.volBase : (r.totalNotional / (r.close + EPS));
+          maxTrade = { price: r.close, qty, notional: r.totalNotional, side, tMs: null };
+        }
+      }
+
+      const net = buySum - sellSum;
+      return { count, buyNotional: buySum, sellNotional: sellSum, net, maxTrade };
+    }
+
+function renderEthWhaleWindows(rows, whaleUsd) {
       const meta = document.getElementById("ethWhaleMeta");
       const tbody = document.getElementById("ethWhaleWindows");
       const footer = document.getElementById("ethWhaleFooter");
@@ -1151,7 +1239,7 @@ function computeAltDailyLast3() {
       }
 
       footer.textContent =
-        `Net aggressive = (aggressive buy notional) − (aggressive sell notional) from Binance ETHUSDT aggTrades.`;
+        `12h/24h/48h: aggTrades (exact). 7d: proxy using top 1% 5m candles by taker notional. Net aggressive = buy notional − sell notional.`;
     }
 
     async function refreshEthWhalesAll() {
@@ -1162,7 +1250,6 @@ function computeAltDailyLast3() {
       const start12 = endMs - 12*3600*1000;
       const start24 = endMs - 24*3600*1000;
       const start48 = endMs - 48*3600*1000;
-      const start7d  = endMs - 7*24*3600*1000;
 
       const state = {
         "12h": { loading: true, metrics: { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null } },
@@ -1176,7 +1263,7 @@ function computeAltDailyLast3() {
           { label: "12h", metrics: state["12h"].metrics, loading: state["12h"].loading },
           { label: "24h", metrics: state["24h"].metrics, loading: state["24h"].loading },
           { label: "48h", metrics: state["48h"].metrics, loading: state["48h"].loading },
-          { label: "7d",  metrics: state["7d"].metrics,  loading: state["7d"].loading  },
+          { label: "7d (proxy)",  metrics: state["7d"].metrics,  loading: state["7d"].loading  },
         ], ETH_WHALE_USD);
       };
 
@@ -1196,7 +1283,7 @@ function computeAltDailyLast3() {
 
         // Stage 2: 48h + 7d in parallel
         const p48 = fetchAggTradesPaged("ETHUSDT", start48, endMs);
-        const p7d = fetchAggTradesPaged("ETHUSDT", start7d, endMs);
+        const p7d = fetchEth7dWhaleProxy();
 
         // 48h -> derive 24h/48h
         try {
@@ -1215,8 +1302,8 @@ function computeAltDailyLast3() {
 
         // 7d
         try {
-          const agg7d = await p7d;
-          state["7d"].metrics = computeWhaleMetricsLite(agg7d, ETH_WHALE_USD);
+          const m7d = await p7d;
+          state["7d"].metrics = m7d;
           state["7d"].loading = false;
           renderFromState();
         } catch (e) {
