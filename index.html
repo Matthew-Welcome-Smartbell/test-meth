@@ -28,8 +28,6 @@
     .warnRed { background: #fff1f1; border-color: #f0b5b5; color: #7a0000; font-weight: 700; }
     .warnYellow { background: #fff9e6; border-color: #f0d48a; color: #6a5200; font-weight: 700; }
 
-    /* weights UI */
-    input[type="number"] { width: 120px; padding: 6px; border: 1px solid #ddd; border-radius: 8px; }
     button { padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background: #f7f7f7; cursor: pointer; }
     button:hover { background: #efefef; }
     .err { color: #a40000; }
@@ -41,15 +39,11 @@
     .predVal { font-size:16px; font-weight:700; }
     .predMeta { font-size:12px; color:#666; margin-top:4px; }
 
-    /* NEW: Events/news embeds */
+    /* Events/news embeds */
     .embedWrap { width: 100%; border: 1px solid #eee; border-radius: 12px; overflow: hidden; }
     .embedHead { padding: 8px 10px; border-bottom: 1px solid #eee; background: #fafafa; font-size: 12px; color: #666; }
     .tvWrap { width: 100%; }
     .tvWrap > div, .tvWrap iframe { width: 100% !important; }
-    .eventsTable th { font-size: 12px; color: #666; }
-    .impactHigh { color:#7a0000; font-weight:700; }
-    .impactMed { color:#6a5200; font-weight:700; }
-    .impactLow { color:#666; font-weight:700; }
     .linkish { color:#0b57d0; text-decoration:none; }
     .linkish:hover { text-decoration: underline; }
   </style>
@@ -94,7 +88,6 @@
 
         <div id="priceStats" class="muted small" style="margin-top:10px;"></div>
 
-        <!-- RESTORED: Price prediction outputs -->
         <div class="predRow">
           <div class="predBox">
             <div class="predTitle">Predicted BTC (tomorrow / 1 week) using FGI avg windows</div>
@@ -115,7 +108,6 @@
     </div>
   </div>
 
-  <!-- NEW: Events & News (No-API embeds + manual key dates) -->
   <div class="card">
     <div class="muted">Events &amp; News (no API keys). Macro calendar + top headlines.</div>
 
@@ -124,7 +116,6 @@
         <div class="embedWrap">
           <div class="embedHead">Economic calendar (macro events)</div>
           <div class="tvWrap">
-            <!-- TradingView Economic Calendar widget -->
             <div class="tradingview-widget-container">
               <div class="tradingview-widget-container__widget"></div>
               <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-events.js" async>
@@ -147,7 +138,6 @@
         <div class="embedWrap">
           <div class="embedHead">Top stories (market headlines)</div>
           <div class="tvWrap">
-            <!-- TradingView Top Stories widget -->
             <div class="tradingview-widget-container">
               <div class="tradingview-widget-container__widget"></div>
               <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-timeline.js" async>
@@ -167,10 +157,7 @@
         </div>
       </div>
     </div>
-
-    
   </div>
-
 
   <div class="card">
     <div class="muted">MyFGI history (last 24h, 1 point/min). Backfill fetch uses last 72h to support “3+ days” warnings.</div>
@@ -180,8 +167,6 @@
       Note: Binance does not provide historical order book. MyFGI backfill uses a candle-based proxy for OB; live uses real depth10 imbalance.
     </div>
   </div>
-
-  
 
   <div class="card">
     <div class="muted">Live per-asset components (MyFGI, computed from Binance WS)</div>
@@ -194,7 +179,6 @@
       <tbody id="rows"></tbody>
     </table>
   </div>
-
 
   <div class="card">
     <div class="muted">ETH Whale Activity (Binance aggTrades, threshold $50K)</div>
@@ -222,35 +206,19 @@
     // CONFIG
     // ============================
     const SYMBOLS = ["BTCUSDT", "ETHUSDT"];
-
-    // MyFGI basket weights (fixed)
     const WEIGHTS = { "BTCUSDT": 0.50, "ETHUSDT": 0.50 };
-
-    // Average weights requested previously (CoinGlass/CMC removed in Option 1).
-    // We renormalize using only available sources (my + alt).
-    const AVG_W_DESIRED = { my: 0.10, alt: 0.45 }; // sum=0.55; renormalize => my=0.1818 alt=0.8182
-
+    const AVG_W_DESIRED = { my: 0.10, alt: 0.45 };
     const ALT_URL = "https://api.alternative.me/fng/?limit=500&format=json";
-
-    // For averages + warnings we check both BTC and ETH
     const PRICE_SYMBOLS = ["BTCUSDT", "ETHUSDT"];
-
     const LIVE_UPDATE_EVERY_MS = 5000;
     const CHART_POINT_SECONDS = 60;
-
-    // Smoothing
     const BASKET_ALPHA_LIVE = 0.10;
     const ALPHA_BACKFILL = 0.10;
-
-    // RESTORED: K_MULT used only for predictions (same semantics as your python script)
     const K_MULT = 18.0;
 
-    // Whale threshold (fixed)
     const ETH_WHALE_USD = 50000;
-
     let whaleFetchInFlight = false;
 
-    // MyFGI params (seconds)
     const P = {
       mom_short_s: 120,
       mom_long_s: 3600,
@@ -308,6 +276,15 @@
       return Number(x).toFixed(d);
     }
 
+    function fmtKMG(x) {
+      if (!Number.isFinite(x)) return "--";
+      const ax = Math.abs(x);
+      if (ax >= 1e9) return (x/1e9).toFixed(2) + "B";
+      if (ax >= 1e6) return (x/1e6).toFixed(2) + "M";
+      if (ax >= 1e3) return (x/1e3).toFixed(2) + "K";
+      return x.toFixed(2);
+    }
+
     function colorForFGI(v) {
       if (!Number.isFinite(v)) return "black";
       if (v >= 60) return "red";
@@ -351,40 +328,33 @@
       return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
     }
 
-        // ============================
     // ============================
-    // ETH WHALE METRICS (REST aggTrades) — 1h / 12h / 24h / 48h
+    // ETH WHALE METRICS (REST aggTrades) — 1h / 12h / 24h
     // ============================
-    // NOTE: Full 48h trade-level whale metrics can require many requests.
+    // NOTE: Full 24h trade-level whale metrics can require many requests.
     // This implementation is still exact (no sampling/caps), but it:
     //  - uses Binance "data-api" domain (often less restrictive for CORS/rate limits)
-    //  - splits the 48h window into chunks and processes with limited concurrency
+    //  - splits the 24h window into chunks and processes with limited concurrency
     //  - updates UI progressively with progress text
     // ============================
 
     const BINANCE_REST_BASE = "https://data-api.binance.vision";
     const ETH_AGGTRADES_URL = `${BINANCE_REST_BASE}/api/v3/aggTrades`;
 
-    function fmtKMG(x) {
-      if (!Number.isFinite(x)) return "--";
-      const ax = Math.abs(x);
-      if (ax >= 1e9) return (x/1e9).toFixed(2) + "B";
-      if (ax >= 1e6) return (x/1e6).toFixed(2) + "M";
-      if (ax >= 1e3) return (x/1e3).toFixed(2) + "K";
-      return x.toFixed(2);
+    function emptyWhaleMetrics() {
+      return { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxNotional: 0, maxTrade: null };
     }
 
-    function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+    function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
 
-    async function fetchJsonWithRetry(url, { maxRetries=8, baseDelay=250 } = {}) {
-      let delay = baseDelay;
-      for (let attempt=0; attempt<=maxRetries; attempt++) {
+    async function fetchJSONWithRetry(url, tries=8) {
+      let lastErr = null;
+      for (let i=0; i<tries; i++) {
         try {
-          const res = await fetch(url);
+          const res = await fetch(url, { method: "GET" });
           if (res.status === 429 || res.status === 418) {
-            // rate limit; backoff
-            await sleep(delay);
-            delay = Math.min(8000, Math.floor(delay * 1.6));
+            const wait = Math.min(15000, 600 * Math.pow(1.8, i));
+            await sleep(wait + Math.random()*250);
             continue;
           }
           if (!res.ok) {
@@ -393,97 +363,82 @@
           }
           return await res.json();
         } catch (e) {
-          if (attempt === maxRetries) throw e;
-          await sleep(delay);
-          delay = Math.min(8000, Math.floor(delay * 1.6));
+          lastErr = e;
+          const wait = Math.min(15000, 400 * Math.pow(1.7, i));
+          await sleep(wait + Math.random()*250);
         }
       }
-      throw new Error("unreachable");
+      throw lastErr || new Error("fetch failed");
     }
 
-    function emptyWhaleMetrics() {
-      return { count: 0, buyNotional: 0, sellNotional: 0, net: 0, maxTrade: null };
-    }
-
-    function addTradeToMetrics(metrics, t, whaleUsd) {
-      const price = Number(t.p);
-      const qty = Number(t.q);
-      if (!Number.isFinite(price) || !Number.isFinite(qty)) return;
-
-      const notional = price * qty;
-      if (notional < whaleUsd) return;
-
-      metrics.count++;
-      const isAggSell = Boolean(t.m);
-      if (isAggSell) metrics.sellNotional += notional;
-      else metrics.buyNotional += notional;
-
-      if (!metrics.maxTrade || notional > metrics.maxTrade.notional) {
-        metrics.maxTrade = { price, qty, notional, side: isAggSell ? "SELL" : "BUY", tMs: Number(t.T) };
-      }
-      metrics.net = metrics.buyNotional - metrics.sellNotional;
-    }
-
-    async function processAggTradesWindow(symbol, startTimeMs, endTimeMs, whaleUsd, onProgress) {
-      // Exact: iterate all aggTrades in [startTimeMs, endTimeMs], 1000 at a time.
-      // Pagination method: time cursor stepping using last trade timestamp + 1ms.
+    async function processAggTradesWindow(symbol, startMs, endMs, whaleUsd, onProgress) {
       const limit = 1000;
-      let cursor = startTimeMs;
-
-      const metrics = emptyWhaleMetrics();
-
+      let cursor = startMs;
       let calls = 0;
-      let lastProgressAt = 0;
 
-      while (cursor < endTimeMs) {
+      const m = emptyWhaleMetrics();
+
+      function upd(tMs, price, qty, notional, isAggSell) {
+        m.count += 1;
+        if (isAggSell) m.sellNotional += notional;
+        else m.buyNotional += notional;
+
+        if (notional > m.maxNotional) {
+          m.maxNotional = notional;
+          m.maxTrade = { price, qty, notional, side: isAggSell ? "SELL" : "BUY", tMs };
+        }
+      }
+
+      while (cursor < endMs) {
         const url = new URL(ETH_AGGTRADES_URL);
         url.searchParams.set("symbol", symbol);
         url.searchParams.set("startTime", String(cursor));
-        url.searchParams.set("endTime", String(endTimeMs));
+        url.searchParams.set("endTime", String(endMs));
         url.searchParams.set("limit", String(limit));
 
-        const batch = await fetchJsonWithRetry(url.toString(), { maxRetries: 8, baseDelay: 250 });
+        const batch = await fetchJSONWithRetry(url.toString());
         calls++;
 
         if (!Array.isArray(batch) || batch.length === 0) break;
 
         for (const t of batch) {
-          const T = Number(t.T);
-          if (T < startTimeMs) continue;
-          if (T > endTimeMs) break;
-          addTradeToMetrics(metrics, t, whaleUsd);
+          const tMs = Number(t.T);
+          if (tMs < startMs) continue;
+          if (tMs > endMs) break;
+
+          const price = Number(t.p);
+          const qty = Number(t.q);
+          if (!Number.isFinite(price) || !Number.isFinite(qty)) continue;
+
+          const notional = price * qty;
+          if (notional < whaleUsd) continue;
+
+          const isAggSell = Boolean(t.m);
+          upd(tMs, price, qty, notional, isAggSell);
         }
 
         const last = batch[batch.length - 1];
-        const lastT = Number(last?.T);
-        if (!Number.isFinite(lastT)) break;
-
-        const nextCursor = lastT + 1;
-        if (nextCursor <= cursor) break;
+        const nextCursor = Number(last.T) + 1;
+        if (!Number.isFinite(nextCursor) || nextCursor <= cursor) break;
         cursor = nextCursor;
 
-        // Throttle slightly to reduce 429 risk
-        await sleep(120);
-
-        const now = Date.now();
-        if (onProgress && (now - lastProgressAt) > 1000) {
-          lastProgressAt = now;
-          const pct = Math.max(0, Math.min(100, ((cursor - startTimeMs) / (endTimeMs - startTimeMs)) * 100));
-          onProgress({ calls, pct });
+        if (typeof onProgress === "function") {
+          const done = Math.max(0, Math.min(1, (cursor - startMs) / (endMs - startMs + EPS)));
+          onProgress({ pct: 100 * done, calls });
         }
 
+        if (Number(last.T) >= endMs) break;
         if (batch.length < limit) break;
       }
 
-      return metrics;
+      m.net = m.buyNotional - m.sellNotional;
+      return m;
     }
 
-    async function processAggTradesChunked48h(symbol, start48, endMs, whaleUsd, onProgress) {
-      // Split 48h into chunks and process with limited concurrency, still exact.
-      // Chunking helps wall-clock time while staying under rate limits.
-      const CHUNK_MS = 6 * 3600 * 1000; // 6h chunks
+    async function processAggTradesChunked24h(symbol, start24, endMs, whaleUsd, onProgress) {
+      const CHUNK_MS = 6 * 3600 * 1000;
       const chunks = [];
-      for (let s = start48; s < endMs; s += CHUNK_MS) {
+      for (let s = start24; s < endMs; s += CHUNK_MS) {
         const e = Math.min(endMs, s + CHUNK_MS);
         chunks.push({ s, e });
       }
@@ -491,20 +446,25 @@
       const m1 = emptyWhaleMetrics();
       const m12 = emptyWhaleMetrics();
       const m24 = emptyWhaleMetrics();
-      const m48 = emptyWhaleMetrics();
 
       const start1 = endMs - 1 * 3600 * 1000;
       const start12 = endMs - 12 * 3600 * 1000;
-      const start24 = endMs - 24 * 3600 * 1000;
 
-      // Process each chunk: compute whale metrics per chunk, but we still need to
-      // attribute trades to 1h/12h/24h/48h. To keep it exact without storing trades,
-      // we process the chunk by iterating the trades and updating the appropriate buckets.
-      async function processChunk(chunk, chunkIdx, totalChunks) {
-        let cursor = chunk.s;
+      function upd(m, tMs, price, qty, notional, isAggSell) {
+        m.count += 1;
+        if (isAggSell) m.sellNotional += notional;
+        else m.buyNotional += notional;
+
+        if (notional > m.maxNotional) {
+          m.maxNotional = notional;
+          m.maxTrade = { price, qty, notional, side: isAggSell ? "SELL" : "BUY", tMs };
+        }
+      }
+
+      async function fetchChunkTrades(chunk, chunkIdx, totalChunks) {
         const limit = 1000;
+        let cursor = chunk.s;
         let calls = 0;
-        let lastProgressAt = 0;
 
         while (cursor < chunk.e) {
           const url = new URL(ETH_AGGTRADES_URL);
@@ -513,67 +473,63 @@
           url.searchParams.set("endTime", String(chunk.e));
           url.searchParams.set("limit", String(limit));
 
-          const batch = await fetchJsonWithRetry(url.toString(), { maxRetries: 8, baseDelay: 250 });
+          const batch = await fetchJSONWithRetry(url.toString());
           calls++;
 
           if (!Array.isArray(batch) || batch.length === 0) break;
 
           for (const t of batch) {
-            const T = Number(t.T);
-            if (!Number.isFinite(T)) continue;
-            if (T < chunk.s) continue;
-            if (T > chunk.e) break;
+            const tMs = Number(t.T);
+            if (tMs < chunk.s) continue;
+            if (tMs >= chunk.e) break;
 
-            // Always in 48h by construction
-            addTradeToMetrics(m48, t, whaleUsd);
-            if (T >= start24) addTradeToMetrics(m24, t, whaleUsd);
-            if (T >= start12) addTradeToMetrics(m12, t, whaleUsd);
-            if (T >= start1)  addTradeToMetrics(m1,  t, whaleUsd);
+            const price = Number(t.p);
+            const qty = Number(t.q);
+            if (!Number.isFinite(price) || !Number.isFinite(qty)) continue;
+
+            const notional = price * qty;
+            if (notional < whaleUsd) continue;
+
+            const isAggSell = Boolean(t.m);
+
+            upd(m24, tMs, price, qty, notional, isAggSell);
+            if (tMs >= start12) upd(m12, tMs, price, qty, notional, isAggSell);
+            if (tMs >= start1)  upd(m1,  tMs, price, qty, notional, isAggSell);
           }
 
           const last = batch[batch.length - 1];
-          const lastT = Number(last?.T);
-          if (!Number.isFinite(lastT)) break;
-
-          const nextCursor = lastT + 1;
-          if (nextCursor <= cursor) break;
+          const nextCursor = Number(last.T) + 1;
+          if (!Number.isFinite(nextCursor) || nextCursor <= cursor) break;
           cursor = nextCursor;
 
-          await sleep(120);
-
-          const now = Date.now();
-          if (onProgress && (now - lastProgressAt) > 1200) {
-            lastProgressAt = now;
-            const chunkPct = Math.max(0, Math.min(100, ((cursor - chunk.s) / (chunk.e - chunk.s)) * 100));
-            onProgress({
-              chunkIdx: chunkIdx + 1,
-              totalChunks,
-              chunkPct,
-              calls
-            });
+          if (typeof onProgress === "function") {
+            const done = Math.max(0, Math.min(1, (cursor - chunk.s) / (chunk.e - chunk.s + EPS)));
+            onProgress({ chunkIdx, totalChunks, chunkPct: 100 * done, calls });
           }
 
+          if (Number(last.T) >= chunk.e) break;
           if (batch.length < limit) break;
         }
       }
 
-      // Limited concurrency runner
       const CONCURRENCY = 2;
-      let i = 0;
-      const total = chunks.length;
+      let next = 0;
 
       async function worker() {
-        while (i < total) {
-          const idx = i++;
-          await processChunk(chunks[idx], idx, total);
+        while (true) {
+          const idx = next++;
+          if (idx >= chunks.length) return;
+          await fetchChunkTrades(chunks[idx], idx + 1, chunks.length);
         }
       }
 
-      const workers = [];
-      for (let w=0; w<CONCURRENCY; w++) workers.push(worker());
-      await Promise.all(workers);
+      await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
 
-      return { m1, m12, m24, m48 };
+      m1.net = m1.buyNotional - m1.sellNotional;
+      m12.net = m12.buyNotional - m12.sellNotional;
+      m24.net = m24.buyNotional - m24.sellNotional;
+
+      return { m1, m12, m24 };
     }
 
     function renderEthWhaleWindows(rows, whaleUsd) {
@@ -625,13 +581,12 @@
       whaleFetchInFlight = true;
 
       const endMs = Date.now();
-      const start48 = endMs - 48*3600*1000;
+      const start24 = endMs - 24*3600*1000;
 
       const state = {
         "1h":  { loading: true, metrics: emptyWhaleMetrics() },
         "12h": { loading: true, metrics: emptyWhaleMetrics() },
         "24h": { loading: true, metrics: emptyWhaleMetrics() },
-        "48h": { loading: true, metrics: emptyWhaleMetrics() },
       };
 
       const renderFromState = (progressText="") => {
@@ -639,7 +594,6 @@
           { label: "1h",  metrics: state["1h"].metrics,  loading: state["1h"].loading  },
           { label: "12h", metrics: state["12h"].metrics, loading: state["12h"].loading },
           { label: "24h", metrics: state["24h"].metrics, loading: state["24h"].loading },
-          { label: "48h", metrics: state["48h"].metrics, loading: state["48h"].loading },
         ], ETH_WHALE_USD);
 
         const footer = document.getElementById("ethWhaleFooter");
@@ -649,42 +603,36 @@
       try {
         renderFromState("Loading whale windows…");
 
-        // Stage 1: 1h exact (fastest)
         try {
           const start1 = endMs - 1*3600*1000;
           state["1h"].metrics = await processAggTradesWindow("ETHUSDT", start1, endMs, ETH_WHALE_USD, (p)=>{
             renderFromState(`Loading 1h… ${p.pct.toFixed(0)}% (calls: ${p.calls})`);
           });
           state["1h"].loading = false;
-          renderFromState("Loading 48h (this can take a while)…");
+          renderFromState("Loading 24h…");
         } catch (e) {
           state["1h"].loading = false;
           renderFromState(`ETH whale (1h) failed: ${String(e.message || e)}`);
         }
 
-        // Stage 2: 48h chunked exact (derive 12/24/48 inside the scan)
         try {
-          const res = await processAggTradesChunked48h("ETHUSDT", start48, endMs, ETH_WHALE_USD, (p)=>{
-            renderFromState(`Loading 48h… chunk ${p.chunkIdx}/${p.totalChunks} ${p.chunkPct.toFixed(0)}% (recent calls: ${p.calls})`);
+          const res = await processAggTradesChunked24h("ETHUSDT", start24, endMs, ETH_WHALE_USD, (p)=>{
+            renderFromState(`Loading 24h… chunk ${p.chunkIdx}/${p.totalChunks} ${p.chunkPct.toFixed(0)}% (calls: ${p.calls})`);
           });
 
-          state["1h"].metrics = res.m1;     // recompute from full scan (still exact)
+          state["1h"].metrics = res.m1;
           state["12h"].metrics = res.m12;
           state["24h"].metrics = res.m24;
-          state["48h"].metrics = res.m48;
 
           state["1h"].loading = false;
           state["12h"].loading = false;
           state["24h"].loading = false;
-          state["48h"].loading = false;
 
           renderFromState("");
         } catch (e) {
-          // mark remaining as not loading so UI doesn't look stuck
           state["12h"].loading = false;
           state["24h"].loading = false;
-          state["48h"].loading = false;
-          renderFromState(`ETH whale (48h/24h/12h) failed: ${String(e.message || e)}`);
+          renderFromState(`ETH whale (24h/12h) failed: ${String(e.message || e)}`);
         }
 
       } finally {
@@ -693,10 +641,10 @@
     }
 
     // ============================
-// BINANCE REST
+    // BINANCE REST
     // ============================
     async function fetchKlines(symbol, interval, startMs, endMs, limit=1000) {
-      const url = new URL("https://data-api.binance.vision/api/v3/klines");
+      const url = new URL("https://api.binance.com/api/v3/klines");
       url.searchParams.set("symbol", symbol);
       url.searchParams.set("interval", interval);
       if (startMs != null) url.searchParams.set("startTime", String(startMs));
@@ -711,13 +659,11 @@
       return await res.json();
     }
 
-    // Fetch last N minutes of 1m candles, paginated
     async function fetchLastNMinutes1m(symbol, minutes) {
       const now = Date.now();
       const start = now - minutes * 60 * 1000;
       const out = [];
 
-      // Binance max 1000 klines per request. Page forward.
       let cursor = start;
       const end = now;
       let guard = 0;
@@ -1033,12 +979,13 @@
       el.textContent = "MyFGI backfill: fetching 72h of 1m candles (BTC/ETH)…";
 
       const bySym = {};
-      // Fetch both symbols in parallel for faster load
-      const tasks = SYMBOLS.map(sym =>
-        fetchLastNMinutes1m(sym, 72*60).then(kl => [sym, computeAssetFrom1m(klinesToSeries(kl))])
-      );
-      const results = await Promise.all(tasks);
-      for (const [sym, series] of results) bySym[sym] = series;
+      const p1 = fetchLastNMinutes1m("BTCUSDT", 72*60);
+      const p2 = fetchLastNMinutes1m("ETHUSDT", 72*60);
+
+      const [klBTC, klETH] = await Promise.all([p1, p2]);
+
+      bySym["BTCUSDT"] = computeAssetFrom1m(klinesToSeries(klBTC));
+      bySym["ETHUSDT"] = computeAssetFrom1m(klinesToSeries(klETH));
 
       const ref = bySym[SYMBOLS[0]].t;
       const has = {};
@@ -1127,7 +1074,7 @@
     // ============================
     // PRICE AVERAGES (BTC + ETH)
     // ============================
-    let dailyCloses = { "BTCUSDT": null, "ETHUSDT": null }; // each: [{tSec, close}]
+    let dailyCloses = { "BTCUSDT": null, "ETHUSDT": null };
     let lastTradePrice = { "BTCUSDT": null, "ETHUSDT": null };
 
     function avgLastNCloses(symbol, n) {
@@ -1140,10 +1087,9 @@
     }
 
     async function loadDailyClosesAll() {
-      // fetch enough for 90 days + buffer (parallel)
-      const tasks = PRICE_SYMBOLS.map(sym => fetchDailyCloses(sym, 120).then(v => [sym, v]));
-      const results = await Promise.all(tasks);
-      for (const [sym, v] of results) dailyCloses[sym] = v;
+      const [btc, eth] = await Promise.all([fetchDailyCloses("BTCUSDT", 120), fetchDailyCloses("ETHUSDT", 120)]);
+      dailyCloses["BTCUSDT"] = btc;
+      dailyCloses["ETHUSDT"] = eth;
     }
 
     function getPriceNow(symbol) {
@@ -1175,9 +1121,6 @@
       return { btc, eth };
     }
 
-    // ============================
-    // AVERAGE FGI (Option 1: My + Alt only)
-    // ============================
     function computeAvgFgi(my, alt) {
       const wMy = Number(AVG_W_DESIRED.my || 0);
       const wAlt = Number(AVG_W_DESIRED.alt || 0);
@@ -1238,11 +1181,9 @@
     }
 
     // ============================
-    // RESTORED: PRICE PREDICTIONS (k_fit * K_MULT) USING AVG FGI 2D/7D
+    // PRICE PREDICTIONS
     // ============================
-    function centeredFgi(v) {
-      return Number.isFinite(v) ? (Number(v) - 50.0) : NaN;
-    }
+    function centeredFgi(v) { return Number.isFinite(v) ? (Number(v) - 50.0) : NaN; }
 
     function mean(arr) {
       const xs = arr.filter(x => Number.isFinite(x));
@@ -1250,10 +1191,7 @@
       return xs.reduce((a,b)=>a+b,0) / xs.length;
     }
 
-    // Fit k (no intercept) for dP ≈ k*(FGI-50)*dt over daily history
     function fitKLeastSquares(priceSeries, fgiSeries) {
-      // priceSeries: [{tSec, close}] daily close
-      // fgiSeries: Map dayKey -> fgi (0..100) (we'll align using dayKeyUTC)
       if (!priceSeries || priceSeries.length < 10) return NaN;
 
       let prev = null;
@@ -1267,7 +1205,7 @@
         if (prev == null || !Number.isFinite(prev) || !Number.isFinite(row.close)) { prev = row.close; continue; }
 
         const dP = row.close - prev;
-        const fc = centeredFgi(fgi); // (FGI-50)
+        const fc = centeredFgi(fgi);
         x.push(fc);
         y.push(dP);
 
@@ -1277,10 +1215,7 @@
       if (x.length < 10) return NaN;
 
       let denom = 0, numer = 0;
-      for (let i=0; i<x.length; i++) {
-        denom += x[i]*x[i];
-        numer += x[i]*y[i];
-      }
+      for (let i=0; i<x.length; i++) { denom += x[i]*x[i]; numer += x[i]*y[i]; }
       if (denom <= 0) return NaN;
       return numer / denom;
     }
@@ -1294,9 +1229,7 @@
         myByDay.set(day, o);
       }
       const myAvg = new Map();
-      for (const [day, o] of myByDay.entries()) {
-        if (o.n) myAvg.set(day, o.sum/o.n);
-      }
+      for (const [day, o] of myByDay.entries()) { if (o.n) myAvg.set(day, o.sum/o.n); }
 
       const altMap = new Map();
       for (const a of (altHistoryDaily || [])) {
@@ -1317,9 +1250,7 @@
 
     function computePredictions(avgFgiDailyMap, symbol) {
       const closes = dailyCloses[symbol];
-      if (!closes || closes.length < 30 || !avgFgiDailyMap) {
-        return { ok:false, msg:"insufficient data" };
-      }
+      if (!closes || closes.length < 30 || !avgFgiDailyMap) return { ok:false, msg:"insufficient data" };
 
       const k_fit = fitKLeastSquares(closes, avgFgiDailyMap);
       const k_used = (Number.isFinite(k_fit) ? k_fit : 0) * Number(K_MULT);
@@ -1344,16 +1275,7 @@
       const p_wk_2  = p0 + k_used * fc2 * 7.0;
       const p_wk_7  = p0 + k_used * fc7 * 7.0;
 
-      return {
-        ok: true,
-        k_fit,
-        k_used,
-        fgi2,
-        fgi7,
-        p0,
-        p_tom_2, p_tom_7,
-        p_wk_2,  p_wk_7,
-      };
+      return { ok: true, k_fit, k_used, fgi2, fgi7, p0, p_tom_2, p_tom_7, p_wk_2, p_wk_7 };
     }
 
     function updatePredictionsUI(avgFgiDailyMap) {
@@ -1521,53 +1443,44 @@
       initChart();
       setConn("disconnected");
 
-      // Connect WS immediately so live tiles start updating ASAP
       connectWS();
 
-      // Kick off slow tasks in parallel (don’t block initial render)
-      loadDailyClosesAll()
-        .catch(e => { document.getElementById("priceStats").textContent = `Daily close load failed: ${String(e.message || e)}`; });
+      loadDailyClosesAll().catch(e => {
+        document.getElementById("priceStats").textContent = `Daily close load failed: ${String(e.message || e)}`;
+      });
 
-      loadMyFgiBackfill72h()
-        .catch(e => { document.getElementById("backfill").textContent = `MyFGI backfill failed: ${String(e.message || e)}`; });
+      loadMyFgiBackfill72h().catch(e => {
+        document.getElementById("backfill").textContent = `MyFGI backfill failed: ${String(e.message || e)}`;
+      });
 
-      refreshAlt()
-        .catch(e => { altNow = NaN; altNowMeta = `Alternative.me fetch failed: ${String(e.message || e)}`; });
+      refreshAlt().catch(e => {
+        altNow = NaN;
+        altNowMeta = `Alternative.me fetch failed: ${String(e.message || e)}`;
+      });
 
-      // ETH whales: refresh in background (12h/24h/48h/7d)
-      refreshEthWhalesAll()
-        .catch(e => {
-          const foot = document.getElementById("ethWhaleFooter");
-          if (foot) foot.textContent = `ETH whale fetch failed: ${String(e.message || e)}`;
-        });
-
-      // periodic refreshes
-      setInterval(async () => { try { await refreshAlt(); } catch {} }, 60 * 1000);
+      refreshEthWhalesAll().catch(()=>{});
       setInterval(async () => { try { await refreshEthWhalesAll(); } catch {} }, 3 * 60 * 1000);
+
+      setInterval(async () => { try { await refreshAlt(); } catch {} }, 60 * 1000);
 
       setInterval(() => {
         const mySnap = computeMyFgiLiveOnce();
         if (!mySnap) return;
 
-        // Update MyFGI tile
         setTile(
           "myFgi",
           "myMeta",
           mySnap.fgi,
-          `raw=${fmt(mySnap.fgi_raw,2)} | alpha=${BASKET_ALPHA_LIVE} | basket weights fixed (BTC 50%, ETH 50%) | ${new Date(mySnap.t_sec*1000).toLocaleString()}`
+          `raw=${fmt(mySnap.fgi_raw,2)} | alpha=${BASKET_ALPHA_LIVE} | weights: BTC=50% ETH=50% | ${new Date(mySnap.t_sec*1000).toLocaleString()}`
         );
 
-        // Update Alt tile
         setTile("altFgi", "altMeta", altNow, altNowMeta);
 
-        // Compute AVG (renormalized on available sources)
         const { avg, meta } = computeAvgFgi(mySnap.fgi, altNow);
         setTile("avgFgi", "avgMeta", avg, meta);
 
-        // Update price stats + warnings
         const pricePack = updatePriceStatsUI();
 
-        // Daily series for 3+ days check
         const myDaily = computeMyFgiDailyAveragesLast3Days();
         const altDaily = computeAltDailyLast3();
 
@@ -1587,14 +1500,10 @@
 
         evaluateWarnings(avg, pricePack, avgDaily);
 
-        // RESTORED: predictions (uses daily closes + daily avg fgi series)
         const avgFgiDailyMap = buildDailyAvgFgiSeries(myFgiSeries, altHistory);
         updatePredictionsUI(avgFgiDailyMap);
 
-        // Update per-asset table
         updateTable(mySnap.assets);
-
-        // Update chart
         maybeAppendChartPoint(mySnap);
 
       }, LIVE_UPDATE_EVERY_MS);
